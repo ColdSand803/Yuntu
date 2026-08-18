@@ -1,0 +1,315 @@
+{
+  "schema_version": "1",
+  "catalog_version": "2026-08-04.1",
+  "effective_date": "2026-08-04",
+  "review_status": "reviewed",
+  "sources": [
+    {
+      "source_id": "p0_contract",
+      "title": "v0.9.4 P0 contract inventory and accepted design",
+      "publisher": "yuntu-travel",
+      "source_uri": "docs/v0.9.4-trip-cost-estimate-p0-inventory.md",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Return lookup is directional and cannot reuse outbound sourced fares."]
+    },
+    {
+      "source_id": "hotel_bj_qianmen",
+      "title": "2026 Qianmen & Temple of Heaven accommodation averages",
+      "publisher": "Agoda",
+      "source_uri": "https://www.agoda.com/zh-cn/qianmen-temple-of-heaven/maps/beijing-cn.html",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Comfort overall/weekend/tonight averages: CNY 448/403/426."]
+    },
+    {
+      "source_id": "hotel_sh_lujiazui",
+      "title": "2026 Shanghai Tower area accommodation averages",
+      "publisher": "Agoda",
+      "source_uri": "https://www.agoda.com/zh-cn/hotels-near-shanghai-tower/attractions/shanghai-cn.html",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Comfort overall/weekend/tonight averages: CNY 306/333/260."]
+    },
+    {
+      "source_id": "hotel_cq_yuzhong",
+      "title": "2026 Yuzhong accommodation averages",
+      "publisher": "Agoda",
+      "source_uri": "https://www.agoda.com/zh-cn/yuzhong/maps/chongqing-cn.html",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Comfort overall/weekend/tonight averages: CNY 249/221/211."]
+    },
+    {
+      "source_id": "hotel_cd_chenghua",
+      "title": "2026 Chenghua District accommodation averages",
+      "publisher": "Agoda",
+      "source_uri": "https://www.agoda.com/zh-cn/chenghua-district/maps/chengdu-cn.html",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Comfort overall/weekend/tonight averages: CNY 273/266/264."]
+    },
+    {
+      "source_id": "hotel_hz_xianghu",
+      "title": "2026 Xianghu area accommodation averages",
+      "publisher": "Agoda",
+      "source_uri": "https://www.agoda.com/zh-cn/hotels-near-xiang-lake-tourist-resort-area-of-hangzhou/attractions/hangzhou-cn.html",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Comfort overall/weekend/tonight averages: CNY 220/256/210."]
+    },
+    {
+      "source_id": "admission_bj_palace",
+      "title": "Palace Museum ticket policy",
+      "publisher": "Palace Museum",
+      "source_uri": "https://www.dpm.org.cn/singles_detail/257830.html",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Adult main admission is CNY 60 peak season and CNY 40 off season."]
+    },
+    {
+      "source_id": "admission_sh_museum",
+      "title": "Shanghai Municipal Government museum guide — Shanghai Museum",
+      "publisher": "Shanghai Municipal Government",
+      "source_uri": "https://www.shanghai.gov.cn/huangpu/index.html",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["The museum is free to enter; some special exhibitions require a separate paid ticket."]
+    },
+    {
+      "source_id": "admission_cq_museum",
+      "title": "Notes for free opening",
+      "publisher": "Chongqing China Three Gorges Museum",
+      "source_uri": "https://www.3gmuseum.cn/web/article/1430008801670434816/web/content_1430008801670434816.html",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["The main museum is open free of charge and ticket."]
+    },
+    {
+      "source_id": "admission_cd_panda",
+      "title": "Chengdu Research Base ticket information",
+      "publisher": "Chengdu Research Base of Giant Panda Breeding",
+      "source_uri": "https://www.panda.org.cn/yd/service/ticket/",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Adult admission is CNY 55 per person."]
+    },
+    {
+      "source_id": "admission_hz_jiangyangfan",
+      "title": "Jiangyangfan Ecological Park visitor information",
+      "publisher": "Hangzhou West Lake Scenic Area Management Committee",
+      "source_uri": "https://westlake.hangzhou.gov.cn/art/2023/5/17/art_1639430_59042393.html",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Admission is free."]
+    },
+    {
+      "source_id": "meal_bj",
+      "title": "Cost of Living in Beijing",
+      "publisher": "Numbeo",
+      "source_uri": "https://www.numbeo.com/cost-of-living/in/Beijing/",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Inexpensive meal range CNY 24-50; mid-range meal for two CNY 100-250."]
+    },
+    {
+      "source_id": "meal_sh",
+      "title": "Cost of Living in Shanghai",
+      "publisher": "Numbeo",
+      "source_uri": "https://www.numbeo.com/cost-of-living/in/Shanghai",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Inexpensive meal range CNY 20-50; mid-range meal for two CNY 150-400."]
+    },
+    {
+      "source_id": "meal_cq",
+      "title": "Cost of Living in Chongqing",
+      "publisher": "Numbeo",
+      "source_uri": "https://www.numbeo.com/cost-of-living/in/Chongqing",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Inexpensive meal range CNY 15-25; mid-range meal for two CNY 120-220."]
+    },
+    {
+      "source_id": "meal_cd",
+      "title": "Cost of Living in Chengdu",
+      "publisher": "Numbeo",
+      "source_uri": "https://www.numbeo.com/cost-of-living/in/Chengdu",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Inexpensive meal range CNY 15-30; mid-range meal for two CNY 100-200."]
+    },
+    {
+      "source_id": "meal_hz",
+      "title": "Cost of Living in Hangzhou",
+      "publisher": "Numbeo",
+      "source_uri": "https://www.numbeo.com/cost-of-living/in/Hangzhou",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Inexpensive meal range CNY 15-50; mid-range meal for two CNY 150-240."]
+    },
+    {
+      "source_id": "taxi_bj",
+      "title": "Beijing cruise taxi fare standard",
+      "publisher": "Beijing Municipal Commission of Transport",
+      "source_uri": "https://jtw.beijing.gov.cn/czqc/zxts/202303/t20230310_2933641.html",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Daytime base fare CNY 13 for 3 km; base distance rate CNY 2.3/km."]
+    },
+    {
+      "source_id": "metro_bj",
+      "title": "About Beijing subway fares",
+      "publisher": "Beijing Municipal Government / Beijing Subway",
+      "source_uri": "https://english.beijing.gov.cn/specials/beijinglifeonthesubway/noticeforpassengers/202504/t20250423_4072294.html",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Ordinary subway fares are CNY 3 up to 6 km and CNY 6 up to 32 km."]
+    },
+    {
+      "source_id": "taxi_sh",
+      "title": "Shanghai taxi fare structure and standard",
+      "publisher": "Shanghai Municipal Transportation Commission",
+      "source_uri": "https://jtw.sh.gov.cn/czqcyj/index.html?q=2027",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Daytime base fare CNY 14 for 3 km; base distance rate CNY 2.7/km."]
+    },
+    {
+      "source_id": "metro_sh",
+      "title": "How to take metro in Shanghai",
+      "publisher": "Shanghai Municipal Government",
+      "source_uri": "https://english.shanghai.gov.cn/en-Transportation/20231214/c727f5e15eff4b8c9340651dd95f3f7c.html",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Metro fare is CNY 3 up to 6 km plus CNY 1 per additional 10 km."]
+    },
+    {
+      "source_id": "taxi_cq",
+      "title": "Current Chongqing cruise taxi fare standard",
+      "publisher": "Chongqing Municipal Commission of Transport",
+      "source_uri": "https://jtj.cq.gov.cn/zwgk_240/zfxxgkml/zczxwdk_370463/jtzf/202209/t20220928_11153250.html",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Daytime base fare CNY 10 for 3 km; base distance rate CNY 2/km."]
+    },
+    {
+      "source_id": "metro_cq",
+      "title": "Chongqing urban rail fare mechanism",
+      "publisher": "Chongqing Municipal Development and Reform Commission",
+      "source_uri": "https://www.fzggw.cq.gov.cn/zwgk/zfxxgkml/zcwj/xzgfxwj/sfzggwxzgfxwj/202507/t20250725_14849290.html",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Fare is CNY 2 up to 4 km and CNY 8 up to 40 km from 2025-07-30."]
+    },
+    {
+      "source_id": "taxi_cd",
+      "title": "Chengdu Public Transport Group 2024 financing prospectus",
+      "publisher": "Chengdu Public Transport Group",
+      "source_uri": "https://pdf.dfcfw.com/pdf/H2_AN202402201622418984_1.pdf",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Fleet base fares are CNY 8 or 9; base distance rate CNY 1.9/km after 2 km."]
+    },
+    {
+      "source_id": "metro_cd",
+      "title": "Chengdu Metro fare policy summary",
+      "publisher": "Chengdu Bendibao",
+      "source_uri": "https://cd.bendibao.com/traffic/2024415/182092.shtm",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Fare starts at CNY 2 for 4 km; the published distance bands yield CNY 6 at 24 km."]
+    },
+    {
+      "source_id": "taxi_hz",
+      "title": "Hangzhou urban cruise taxi fare adjustment",
+      "publisher": "Hangzhou Municipal Government Gazette",
+      "source_uri": "https://zfgb.hangzhou.gov.cn/upload/default/bigfile/2025/06/03/20250603_a6738909dc520976f8699b02ac586109.pdf",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Base fare CNY 13 for 3 km; distance rate CNY 2.5/km through 10 km."]
+    },
+    {
+      "source_id": "metro_hz",
+      "title": "Hangzhou Metro fare policy",
+      "publisher": "Hangzhou Metro",
+      "source_uri": "https://www.hzmetro.com/service_2_show.aspx?ID=1165",
+      "observed_at": "2026-08-04T00:30:00Z",
+      "facts": ["Fare starts at CNY 2 for 4 km; the published distance bands yield CNY 6 at 24 km."]
+    }
+  ],
+  "accommodation": [
+    {
+      "city": "北京", "area_identity": "area:beijing:qianmen_temple_of_heaven", "area_label": "前门/天坛", "period_class": "ordinary",
+      "source_values_fen": [44800, 40300, 42600], "range_fen": {"min_fen": 40300, "max_fen": 44800},
+      "provenance": "Min/max of the published comfort-tier overall, weekend and tonight averages captured on the review date.",
+      "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["hotel_bj_qianmen"]
+    },
+    {
+      "city": "上海", "area_identity": "area:shanghai:lujiazui", "area_label": "陆家嘴", "period_class": "ordinary",
+      "source_values_fen": [30600, 33300, 26000], "range_fen": {"min_fen": 26000, "max_fen": 33300},
+      "provenance": "Min/max of the published comfort-tier overall, weekend and tonight averages captured on the review date.",
+      "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["hotel_sh_lujiazui"]
+    },
+    {
+      "city": "重庆", "area_identity": "area:chongqing:yuzhong", "area_label": "渝中", "period_class": "ordinary",
+      "source_values_fen": [24900, 22100, 21100], "range_fen": {"min_fen": 21100, "max_fen": 24900},
+      "provenance": "Min/max of the published comfort-tier overall, weekend and tonight averages captured on the review date.",
+      "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["hotel_cq_yuzhong"]
+    },
+    {
+      "city": "成都", "area_identity": "area:chengdu:chenghua", "area_label": "成华区", "period_class": "ordinary",
+      "source_values_fen": [27300, 26600, 26400], "range_fen": {"min_fen": 26400, "max_fen": 27300},
+      "provenance": "Min/max of the published comfort-tier overall, weekend and tonight averages captured on the review date.",
+      "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["hotel_cd_chenghua"]
+    },
+    {
+      "city": "杭州", "area_identity": "area:hangzhou:xianghu", "area_label": "湘湖", "period_class": "ordinary",
+      "source_values_fen": [22000, 25600, 21000], "range_fen": {"min_fen": 21000, "max_fen": 25600},
+      "provenance": "Min/max of the published comfort-tier overall, weekend and tonight averages captured on the review date.",
+      "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["hotel_hz_xianghu"]
+    }
+  ],
+  "admission": [
+    {
+      "city": "北京", "place_identity": "official:dpm.org.cn:palace_museum", "place_label": "故宫博物院", "price_kind": "paid",
+      "source_range_fen": {"min_fen": 4000, "max_fen": 6000}, "range_fen": {"min_fen": 4000, "max_fen": 6000},
+      "provenance": "Official adult main-ticket off-season/peak-season prices.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["admission_bj_palace"]
+    },
+    {
+      "city": "上海", "place_identity": "official:shanghaimuseum.net:peoples_square", "place_label": "上海博物馆人民广场馆", "price_kind": "verified_free",
+      "source_range_fen": {"min_fen": 0, "max_fen": 0}, "range_fen": {"min_fen": 0, "max_fen": 0},
+      "provenance": "Official visitor notice; reservation requirements are not an admission charge.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["admission_sh_museum"]
+    },
+    {
+      "city": "重庆", "place_identity": "official:3gmuseum.cn:main_museum", "place_label": "重庆中国三峡博物馆", "price_kind": "verified_free",
+      "source_range_fen": {"min_fen": 0, "max_fen": 0}, "range_fen": {"min_fen": 0, "max_fen": 0},
+      "provenance": "Official free-opening notice for the main museum.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["admission_cq_museum"]
+    },
+    {
+      "city": "成都", "place_identity": "official:panda.org.cn:chengdu_research_base", "place_label": "成都大熊猫繁育研究基地", "price_kind": "paid",
+      "source_range_fen": {"min_fen": 5500, "max_fen": 5500}, "range_fen": {"min_fen": 5500, "max_fen": 5500},
+      "provenance": "Official adult admission price.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["admission_cd_panda"]
+    },
+    {
+      "city": "杭州", "place_identity": "official:westlake.hangzhou.gov.cn:jiangyangfan", "place_label": "江洋畈生态公园", "price_kind": "verified_free",
+      "source_range_fen": {"min_fen": 0, "max_fen": 0}, "range_fen": {"min_fen": 0, "max_fen": 0},
+      "provenance": "Official scenic-area visitor information states free admission.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["admission_hz_jiangyangfan"]
+    }
+  ],
+  "meals": [
+    {"city": "北京", "meal": "lunch", "source_range_fen": {"min_fen": 2400, "max_fen": 5000}, "source_party_size": 1, "range_fen": {"min_fen": 2400, "max_fen": 5000}, "provenance": "Published inexpensive-restaurant range, per person.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["meal_bj"]},
+    {"city": "北京", "meal": "dinner", "source_range_fen": {"min_fen": 10000, "max_fen": 25000}, "source_party_size": 2, "range_fen": {"min_fen": 5000, "max_fen": 12500}, "provenance": "Published mid-range dinner-for-two range divided exactly by two.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["meal_bj"]},
+    {"city": "上海", "meal": "lunch", "source_range_fen": {"min_fen": 2000, "max_fen": 5000}, "source_party_size": 1, "range_fen": {"min_fen": 2000, "max_fen": 5000}, "provenance": "Published inexpensive-restaurant range, per person.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["meal_sh"]},
+    {"city": "上海", "meal": "dinner", "source_range_fen": {"min_fen": 15000, "max_fen": 40000}, "source_party_size": 2, "range_fen": {"min_fen": 7500, "max_fen": 20000}, "provenance": "Published mid-range dinner-for-two range divided exactly by two.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["meal_sh"]},
+    {"city": "重庆", "meal": "lunch", "source_range_fen": {"min_fen": 1500, "max_fen": 2500}, "source_party_size": 1, "range_fen": {"min_fen": 1500, "max_fen": 2500}, "provenance": "Published inexpensive-restaurant range, per person.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["meal_cq"]},
+    {"city": "重庆", "meal": "dinner", "source_range_fen": {"min_fen": 12000, "max_fen": 22000}, "source_party_size": 2, "range_fen": {"min_fen": 6000, "max_fen": 11000}, "provenance": "Published mid-range dinner-for-two range divided exactly by two.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["meal_cq"]},
+    {"city": "成都", "meal": "lunch", "source_range_fen": {"min_fen": 1500, "max_fen": 3000}, "source_party_size": 1, "range_fen": {"min_fen": 1500, "max_fen": 3000}, "provenance": "Published inexpensive-restaurant range, per person.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["meal_cd"]},
+    {"city": "成都", "meal": "dinner", "source_range_fen": {"min_fen": 10000, "max_fen": 20000}, "source_party_size": 2, "range_fen": {"min_fen": 5000, "max_fen": 10000}, "provenance": "Published mid-range dinner-for-two range divided exactly by two.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["meal_cd"]},
+    {"city": "杭州", "meal": "lunch", "source_range_fen": {"min_fen": 1500, "max_fen": 5000}, "source_party_size": 1, "range_fen": {"min_fen": 1500, "max_fen": 5000}, "provenance": "Published inexpensive-restaurant range, per person.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["meal_hz"]},
+    {"city": "杭州", "meal": "dinner", "source_range_fen": {"min_fen": 15000, "max_fen": 24000}, "source_party_size": 2, "range_fen": {"min_fen": 7500, "max_fen": 12000}, "provenance": "Published mid-range dinner-for-two range divided exactly by two.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["meal_hz"]}
+  ],
+  "local_transport": [
+    {"city": "北京", "mode": "taxi", "unit": "daytime_3_to_10_km_leg", "range_fen": {"min_fen": 1300, "max_fen": 2910}, "taxi_fare_inputs": {"base_fare_range_fen": {"min_fen": 1300, "max_fen": 1300}, "included_distance_meters": 3000, "upper_distance_meters": 10000, "per_km_fen": 230}, "provenance": "Official daytime fare formula evaluated deterministically from base distance through 10 km; excludes wait/night/surcharge.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["taxi_bj"]},
+    {"city": "北京", "mode": "public_transit", "unit": "ordinary_subway_ride_0_to_32_km", "range_fen": {"min_fen": 300, "max_fen": 600}, "published_range_fen": {"min_fen": 300, "max_fen": 600}, "provenance": "Published ordinary subway distance bands through 32 km; airport expresses excluded.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["metro_bj"]},
+    {"city": "上海", "mode": "taxi", "unit": "daytime_3_to_10_km_leg", "range_fen": {"min_fen": 1400, "max_fen": 3290}, "taxi_fare_inputs": {"base_fare_range_fen": {"min_fen": 1400, "max_fen": 1400}, "included_distance_meters": 3000, "upper_distance_meters": 10000, "per_km_fen": 270}, "provenance": "Official daytime fare formula evaluated deterministically from base distance through 10 km; excludes wait/night/holiday/surcharge.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["taxi_sh"]},
+    {"city": "上海", "mode": "public_transit", "unit": "ordinary_metro_ride_0_to_26_km", "range_fen": {"min_fen": 300, "max_fen": 500}, "published_range_fen": {"min_fen": 300, "max_fen": 500}, "provenance": "Published metro formula bounded to ordinary trips through 26 km; maglev excluded.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["metro_sh"]},
+    {"city": "重庆", "mode": "taxi", "unit": "daytime_3_to_10_km_leg", "range_fen": {"min_fen": 1000, "max_fen": 2400}, "taxi_fare_inputs": {"base_fare_range_fen": {"min_fen": 1000, "max_fen": 1000}, "included_distance_meters": 3000, "upper_distance_meters": 10000, "per_km_fen": 200}, "provenance": "Official daytime fare formula evaluated deterministically from base distance through 10 km; excludes wait/night/long-distance surcharge.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["taxi_cq"]},
+    {"city": "重庆", "mode": "public_transit", "unit": "ordinary_urban_rail_ride_0_to_40_km", "range_fen": {"min_fen": 200, "max_fen": 800}, "published_range_fen": {"min_fen": 200, "max_fen": 800}, "provenance": "2025 official urban rail distance bands through 40 km; suburban rail excluded.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["metro_cq"]},
+    {"city": "成都", "mode": "taxi", "unit": "daytime_2_to_10_km_leg", "range_fen": {"min_fen": 800, "max_fen": 2420}, "taxi_fare_inputs": {"base_fare_range_fen": {"min_fen": 800, "max_fen": 900}, "included_distance_meters": 2000, "upper_distance_meters": 10000, "per_km_fen": 190}, "provenance": "Published fleet base-fare range and distance rate evaluated deterministically through 10 km; excludes wait/night/long-distance surcharge.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["taxi_cd"]},
+    {"city": "成都", "mode": "public_transit", "unit": "ordinary_metro_ride_0_to_24_km", "range_fen": {"min_fen": 200, "max_fen": 600}, "published_range_fen": {"min_fen": 200, "max_fen": 600}, "provenance": "Published metro distance bands bounded to ordinary trips through 24 km; premium/airport products excluded.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["metro_cd"]},
+    {"city": "杭州", "mode": "taxi", "unit": "daytime_3_to_10_km_leg", "range_fen": {"min_fen": 1300, "max_fen": 3050}, "taxi_fare_inputs": {"base_fare_range_fen": {"min_fen": 1300, "max_fen": 1300}, "included_distance_meters": 3000, "upper_distance_meters": 10000, "per_km_fen": 250}, "provenance": "Official fare formula evaluated deterministically from base distance through 10 km; excludes wait/night/surcharge.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["taxi_hz"]},
+    {"city": "杭州", "mode": "public_transit", "unit": "ordinary_metro_ride_0_to_24_km", "range_fen": {"min_fen": 200, "max_fen": 600}, "published_range_fen": {"min_fen": 200, "max_fen": 600}, "provenance": "Official metro distance bands bounded to ordinary trips through 24 km; intercity products excluded.", "version": "2026-08-04-r1", "effective_date": "2026-08-04", "review_status": "reviewed", "source_ids": ["metro_hz"]}
+  ],
+  "intercity": [],
+  "reverse_intercity_rules": [
+    {
+      "rule_id": "explicit_reverse_direction_only",
+      "lookup_direction": "destination_to_origin",
+      "requires_explicit_reverse_key": true,
+      "allow_outbound_amount_reuse": false,
+      "output_price_basis": "reference",
+      "missing_behavior": "missing",
+      "provenance": "Accepted v0.9.4 D0 directional-return rule and P0 outbound/return gap audit.",
+      "version": "2026-08-04-r1",
+      "effective_date": "2026-08-04",
+      "review_status": "reviewed",
+      "source_ids": ["p0_contract"]
+    }
+  ]
+}

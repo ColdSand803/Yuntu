@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: yuntu-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: yuntu
+      POSTGRES_PASSWORD: yuntupassword
+      POSTGRES_DB: yuntu_travel
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./sql/seed_chongqing.sql:/docker-entrypoint-initdb.d/02_seed_chongqing.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yuntu -d yuntu_travel"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  yuntu:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: yuntu-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "6666:6666"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://yuntu:yuntupassword@postgres:5432/yuntu_travel
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: yuntu-web
+    restart: unless-stopped
+    depends_on:
+      - yuntu
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:

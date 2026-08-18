@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80" fill="none" role="img" aria-label="云途 YunTu">
+  <rect width="80" height="80" rx="20" fill="#0f766e"/>
+  <path d="M46 28c7.5 0 13.5 6 13.5 13.5 0 1-.1 2-.3 3 4.8 1 8.3 5.2 8.3 10.2 0 5.8-4.7 10.5-10.5 10.5H32" fill="none" stroke="#ffffff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M32 65.5c-4.5 0-8-3.6-8-8s3.5-8 8-8" fill="none" stroke="#ffffff" stroke-width="6" stroke-linecap="round" stroke-opacity="0.4"/>
+  <circle cx="21" cy="35" r="7" fill="#f97316"/>
+  <circle cx="21" cy="35" r="2.6" fill="#ffffff"/>
+</svg>

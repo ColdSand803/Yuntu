@@ -1,0 +1,22 @@
+node_modules
+dist
+.env
+.env.local
+.env.*.local
+*.log
+
+# City image binaries are owned by R2/CDN. Local asset-workflow checkouts may
+# sync these directories temporarily, but they must never enter Web Git/builds.
+public/city/
+public/city-opt/
+
+# IDE / 本地杂物（不参与运行）
+.idea/
+.tmp-*
+docs/city/
+.claude/
+.claude-tmp/
+vite.local-sse.config.ts
+
+# 本地生成的代码导航快照（可重建，不能覆盖权威契约）
+docs/codebase/

@@ -1,0 +1,380 @@
+@font-face {
+  font-family: "Satoshi";
+  src: url("./assets/fonts/satoshi-400.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Satoshi";
+  src: url("./assets/fonts/satoshi-500.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Satoshi";
+  src: url("./assets/fonts/satoshi-700.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-primary-500: #0f766e;
+    --color-primary-600: #0c625b;
+    --color-accent-400: #fb923c;
+    --color-accent-500: #f97316;
+    --color-sand-100: #f3f4f6;
+    --color-sand-200: #e5e7eb;
+
+    /* 基础色板 */
+    --color-white: #ffffff;
+    --color-black: #000000;
+    --color-surface: #ffffff;
+    --color-bg-secondary: #f8f9fa;
+    --color-bg-tertiary: #e3f0f5;
+    --color-ink: #1c3640;
+  }
+
+  body {
+    margin: 0;
+    font-family:
+      "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", system-ui,
+      sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background-color: var(--color-white);
+    color: var(--color-ink);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family:
+      "Satoshi", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  }
+}
+
+@layer components {
+  .signature-font {
+    font-family: "STKaiti", "KaiTi", "KaiTi_GB2312", "楷体", serif;
+  }
+
+  .glass-card {
+    background: rgba(255, 255, 255, 0.82);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.1);
+  }
+
+  .journal-card {
+    position: relative;
+    background: rgba(255, 252, 247, 0.85);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border: 1px solid rgba(210, 195, 170, 0.25);
+    box-shadow:
+      0 20px 50px rgba(0, 0, 0, 0.08),
+      inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  }
+
+  .journal-card::before {
+    content: "";
+    position: absolute;
+    left: 20px;
+    top: 16px;
+    bottom: 16px;
+    width: 2px;
+    background: repeating-linear-gradient(
+      to bottom,
+      #a7ded7 0px,
+      #a7ded7 8px,
+      transparent 8px,
+      transparent 14px
+    );
+    opacity: 0.45;
+    pointer-events: none;
+  }
+
+  .polaroid-shadow {
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15);
+  }
+
+  .ticket-notch-mask {
+    -webkit-mask-image: radial-gradient(circle at 0px 105px, transparent 8px, black 9px),
+                        radial-gradient(circle at 100% 105px, transparent 8px, black 9px);
+    -webkit-mask-composite: source-in;
+    mask-image: radial-gradient(circle at 0px 105px, transparent 8px, black 9px),
+                radial-gradient(circle at 100% 105px, transparent 8px, black 9px);
+    mask-composite: intersect;
+  }
+
+  .ambient-glow-sphere {
+    background: radial-gradient(circle, rgba(15, 118, 110, 0.18) 0%, rgba(249, 115, 22, 0.12) 45%, transparent 70%);
+    filter: blur(40px);
+  }
+
+  .mag-card-inner {
+    transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.3s ease;
+  }
+
+  .mag-card:hover .mag-card-inner {
+    transform: translateY(-8px) scale(1.04);
+    box-shadow: 0 28px 55px -12px rgba(0, 0, 0, 0.32), 0 0 0 1.5px rgba(255, 255, 255, 0.95);
+  }
+
+  .hide-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .hide-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .custom-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 4px;
+    background: var(--color-sand-200);
+    border-radius: 2px;
+    outline: none;
+  }
+
+  .custom-slider:focus-visible {
+    outline: 2px solid var(--color-primary-500);
+    outline-offset: 4px;
+    border-radius: 4px;
+  }
+
+  .custom-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    background: var(--color-accent-500);
+    cursor: pointer;
+    border-radius: 50%;
+    border: 3px solid white;
+    box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
+  }
+
+  .custom-slider::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    background: var(--color-accent-500);
+    cursor: pointer;
+    border-radius: 50%;
+    border: 3px solid white;
+    box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
+  }
+
+  /* 首页右栏环境光：尊重系统「减少动态效果」 */
+  @media (prefers-reduced-motion: reduce) {
+    .editorial-ambient {
+      transition: none !important;
+    }
+  }
+
+  .btn-primary {
+    @apply rounded-xl bg-accent-500 px-6 py-3 text-sm font-semibold text-white transition-all duration-200 hover:bg-accent-600 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-accent-300 focus:ring-offset-2 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-secondary {
+    @apply rounded-xl border border-primary-200 bg-white px-5 py-2.5 text-sm font-medium text-primary-700 transition-all duration-200 hover:border-primary-300 hover:bg-primary-50 focus:outline-none focus:ring-2 focus:ring-primary-200 active:scale-[0.98];
+  }
+
+  .card {
+    @apply rounded-2xl border border-primary-100/40 bg-white/90 shadow-soft backdrop-blur-sm transition-all duration-200;
+  }
+
+  .card-interactive {
+    @apply card cursor-pointer hover:-translate-y-0.5 hover:bg-white hover:shadow-card-hover active:scale-[0.98];
+  }
+
+  .form-label {
+    @apply mb-2 block text-sm font-medium text-primary-800;
+  }
+
+  .tag-idle {
+    @apply rounded-full border border-primary-100 bg-white px-4 py-2 text-sm text-primary-700 transition-all duration-150 hover:border-primary-300 hover:bg-primary-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-300;
+  }
+
+  .tag-active {
+    @apply rounded-full border border-primary-500 bg-primary-50 px-4 py-2 text-sm font-medium text-primary-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-300;
+  }
+
+  .error-banner {
+    @apply rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-sm text-red-700;
+  }
+
+  .empty-state {
+    @apply flex flex-col items-center justify-center gap-3 py-16 text-center;
+  }
+
+  .empty-state-icon {
+    @apply text-4xl text-sand-300;
+  }
+
+  .empty-state-text {
+    @apply text-sm text-sand-500;
+  }
+}
+
+@layer utilities {
+  .animate-fade-in {
+    animation: fadeIn 0.4s ease-out both;
+  }
+
+  .animate-slide-up {
+    animation: slideUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .animate-slide-up-delay-1 {
+    animation: slideUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) 0.08s both;
+  }
+
+  .animate-slide-up-delay-2 {
+    animation: slideUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) 0.16s both;
+  }
+
+  .animate-skeleton {
+    animation: skeleton 1.5s ease-in-out infinite;
+  }
+
+  .animate-bg-fade-in {
+    animation: fadeIn 1s ease-in-out both;
+  }
+
+  /* 依次入场：父元素给 .stagger，子项设 style={{'--i': index}} */
+  .stagger > * {
+    animation: slideUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation-delay: calc(var(--i, 0) * 60ms);
+  }
+
+  /* 仅淡入的依次入场（用于自带 transform/旋转的元素，如拍立得卡） */
+  .stagger-fade > * {
+    animation: fadeIn 0.5s ease-out both;
+    animation-delay: calc(var(--i, 0) * 80ms);
+  }
+
+  /* 路由页面转场 */
+  .page-enter {
+    animation: pageEnter 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .loading-dots::after {
+    content: "";
+    animation: loadingDots 1.4s steps(4, end) infinite;
+  }
+
+  /* 数字列等宽，防止金额/温度/时刻在变化或对齐时宽度跳动 */
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+}
+
+@keyframes pageEnter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes loadingDots {
+  0% {
+    content: "";
+  }
+  25% {
+    content: ".";
+  }
+  50% {
+    content: "..";
+  }
+  75% {
+    content: "...";
+  }
+  100% {
+    content: "";
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes cloudDrift {
+  from {
+    transform: translate(0, 0) scale(1);
+  }
+  to {
+    transform: translate(30px, -20px) scale(1.05);
+  }
+}
+
+@keyframes skeleton {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in,
+  .animate-slide-up,
+  .animate-slide-up-delay-1,
+  .animate-slide-up-delay-2,
+  .animate-skeleton,
+  .animate-bg-fade-in,
+  .page-enter,
+  .stagger > *,
+  .stagger-fade > *,
+  .loading-dots::after {
+    animation: none !important;
+  }
+
+  /* 禁用 backdrop-blur 避免眩晕 */
+  .glass-card,
+  .journal-card {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  .glass-card {
+    background: rgba(255, 255, 255, 0.98);
+  }
+  .journal-card {
+    background: rgba(255, 252, 247, 0.98);
+  }
+}
