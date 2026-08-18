@@ -1,6 +1,5 @@
 import { create } from "zustand";
 import { pollJobStatus, ApiRequestError } from "@/services/api";
-import { useAuthStore } from "@/stores/authStore";
 
 const LOCAL_STORAGE_KEY = "yuntu_trip_generation_tasks";
 const POLL_INTERVAL_MS = 3000;
@@ -35,14 +34,11 @@ interface TripTaskStoreState {
 
 let pollingTimer: ReturnType<typeof setInterval> | null = null;
 let initialized = false;
-let authSubscribed = false;
 let checkInFlight = false;
 let currentEpoch = 0;
-let lastUserId: string | null = null;
 
 function getCurrentAccountId(): string {
-  const user = useAuthStore.getState().user;
-  return user?.user_id ? String(user.user_id) : "anonymous";
+  return "guest";
 }
 
 function loadFromLocalStorage(): Record<string, StoredTripTask> {
@@ -120,31 +116,11 @@ function saveToLocalStorage(tasks: Record<string, StoredTripTask>) {
   }
 }
 
-function setupAuthListener() {
-  if (authSubscribed) return;
-  authSubscribed = true;
-
-  useAuthStore.subscribe((state) => {
-    if (state.status === "anonymous") {
-      lastUserId = null;
-      useTripTaskStore.getState().clearAllTasks();
-    } else if (state.status === "authenticated" && state.user?.user_id) {
-      const currentUserId = String(state.user.user_id);
-      if (lastUserId !== null && lastUserId !== currentUserId) {
-        useTripTaskStore.getState().clearAllTasks();
-      }
-      lastUserId = currentUserId;
-    }
-  });
-}
-
 export const useTripTaskStore = create<TripTaskStoreState>((set, get) => ({
   tasks: {},
   activePolling: false,
 
   initStore: () => {
-    setupAuthListener();
-
     if (initialized) return;
     initialized = true;
 

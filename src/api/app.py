@@ -7,7 +7,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -23,6 +23,7 @@ from src.api.internal_admin import (
 from src.api.internal_city import router as internal_city_router
 from src.api.internal_crawl import router as internal_crawl_router
 from src.api.internal_feedback import router as internal_feedback_router
+from src.api.public_guard import verify_public_api_client
 from src.api.trip_artifacts import router as trip_artifacts_router
 from src.api.trip_async import router as trip_async_router
 from src.api.trip_places import internal_router as internal_trip_places_router
@@ -139,7 +140,11 @@ async def health() -> dict:
     return {"ok": True, "service": "yuntu-travel"}
 
 
-@app.post("/trip", response_model=TripResponse)
+@app.post(
+    "/trip",
+    response_model=TripResponse,
+    dependencies=[Depends(verify_public_api_client)],
+)
 async def trip(req: TripRequest) -> TripResponse:
     message = req.message.strip()
     if not message:

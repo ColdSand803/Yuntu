@@ -8,8 +8,6 @@ export function DemoSwitcher() {
   const demos = [
     { id: "capsule", label: "首页·全屏灵感岛", path: "/demo/input-capsule", icon: "fa-compass" },
     { id: "planning", label: "等待页·流光登机牌", path: "/demo/planning", icon: "fa-ticket" },
-    { id: "history", label: "行程页·明信片足迹", path: "/demo/history", icon: "fa-map-location-dot" },
-    { id: "profile", label: "资料页·极简中枢", path: "/demo/profile", icon: "fa-id-card" },
   ];
 
   return (

@@ -32,14 +32,12 @@ describe("city photo library", () => {
     );
   });
 
-  it.each(CITY_FOLDERS)("keeps eight mapped photos for %s", (city, folder) => {
+  it.each(CITY_FOLDERS)("uses bundled Chongqing fallback for %s when no CDN is set", (city, folder) => {
     const images = cityImageList(city);
 
-    expect(images).toHaveLength(8);
-    expect(new Set(images).size).toBe(8);
-    expect(images.every((url) => url.includes(`/city-opt/${folder}/`))).toBe(
-      true,
-    );
-    expect(images.every((url) => cityNameOfImage(url) === city)).toBe(true);
+    expect(images).toEqual(["/bundled/chongqing.png"]);
+    if (folder === "chongqing") {
+      expect(cityNameOfImage(images[0])).toBe("重庆");
+    }
   });
 });

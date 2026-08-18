@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import gsap from 'gsap';
 import { DemoSwitcher } from '@/components/demo/DemoSwitcher';
-import { UserMenu } from '@/components/layout/UserMenu';
+
 import { ProgressTimeline } from '@/components/planning/ProgressTimeline';
 import { BoardingPass } from '@/components/planning/BoardingPass';
 import {
@@ -533,18 +533,7 @@ export default function DemoPlanningPage() {
               <i className="fa-solid fa-compass text-gray-400 text-[11px]" />
               <span>行程规划</span>
             </Link>
-            <Link
-              to="/demo/history"
-              className="inline-flex items-center gap-1.5 text-gray-600 hover:text-gray-900 px-3 py-1.5 rounded-lg hover:bg-sand-100 transition-colors"
-            >
-              <i className="fa-solid fa-map-location-dot text-gray-400 text-[11px]" />
-              <span>我的行程</span>
-            </Link>
           </nav>
-        </div>
-
-        <div className="flex items-center space-x-3">
-          <UserMenu />
         </div>
       </header>
 

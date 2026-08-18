@@ -6,7 +6,6 @@ import asyncio
 import logging
 from pathlib import Path
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from src.config import get_settings
@@ -27,11 +26,13 @@ async def main() -> None:
     logger.info("Connecting to database: %s", settings.database_url)
 
     async with engine.begin() as conn:
+        raw = await conn.get_raw_connection()
+        driver = raw.driver_connection
         if schema_file.exists():
             logger.info("Executing schema.sql...")
             schema_sql = schema_file.read_text(encoding="utf-8")
-            # Split and execute or execute as block
-            await conn.execute(text(schema_sql))
+            # asyncpg prepare() cannot take multiple commands; execute() can.
+            await driver.execute(schema_sql)
             logger.info("Schema created successfully.")
         else:
             logger.error("schema.sql not found at %s", schema_file)
@@ -40,7 +41,7 @@ async def main() -> None:
         if seed_file.exists():
             logger.info("Executing seed_chongqing.sql...")
             seed_sql = seed_file.read_text(encoding="utf-8")
-            await conn.execute(text(seed_sql))
+            await driver.execute(seed_sql)
             logger.info("Chongqing seed data imported successfully.")
         else:
             logger.warning("seed_chongqing.sql not found at %s", seed_file)

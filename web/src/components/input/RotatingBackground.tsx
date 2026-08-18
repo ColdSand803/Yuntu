@@ -1,11 +1,14 @@
 /* eslint-disable react-refresh/only-export-components */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  BUNDLED_FALLBACK_IMAGE,
+  bundledCityImages,
   cityAssetPathname,
   resolveCityAssetVariant,
+  usesBundledCityAssets,
 } from '@/config/cityAssets';
 
-const FALLBACK_IMAGE = '/hero-bg.jpg';
+const FALLBACK_IMAGE = BUNDLED_FALLBACK_IMAGE;
 const ROTATE_INTERVAL_MS = 15000;
 const FADE_MS = 500;
 const LOAD_TIMEOUT_MS = 8000;
@@ -227,6 +230,14 @@ try {
 }
 
 export function resolveOptimalUrl(url: string): string {
+  if (usesBundledCityAssets()) {
+    const folder = cityAssetPathname(url)?.match(/^\/city(?:-opt)?\/([^/]+)\//)?.[1];
+    if (folder && bundledCityImages(folder)[0] !== BUNDLED_FALLBACK_IMAGE) {
+      return bundledCityImages(folder)[0];
+    }
+    if (folder === 'chongqing') return BUNDLED_FALLBACK_IMAGE;
+    return FALLBACK_IMAGE;
+  }
   // 根据当前视口宽度决定是否使用移动端小图
   const isMobile = window.matchMedia?.('(max-width: 768px)')?.matches ?? false;
   return resolveCityAssetVariant(url, {
@@ -247,6 +258,10 @@ function shuffle<T>(arr: T[]): T[] {
 /** 取某城本地风景图 URL（明信片/等待页等共用） */
 export function getCityPhotoUrls(city: string, count = 4): string[] {
   const folder = CITY_NAME_TO_FOLDER[city];
+  if (usesBundledCityAssets()) {
+    const urls = folder ? bundledCityImages(folder) : [FALLBACK_IMAGE];
+    return urls.slice(0, count);
+  }
   if (folder && CITY_IMAGES[folder]?.length) {
     return CITY_IMAGES[folder].slice(0, count).map((f) => resolveOptimalUrl(`/city/${folder}/${f}`));
   }
@@ -261,11 +276,16 @@ function resolveCityPool(cities: string[]): string[] {
     );
     if (!entry) return [];
     const folder = entry[1];
+    if (usesBundledCityAssets()) {
+      return bundledCityImages(folder);
+    }
     return CITY_IMAGES[folder].map((f) => resolveOptimalUrl(`/city/${folder}/${f}`));
   });
 }
 
 export function cityNameOfImage(url: string): string | null {
+  const bundled = cityAssetPathname(url)?.match(/\/bundled\/([^/.]+)\./);
+  if (bundled) return FOLDER_TO_CITY_NAME[bundled[1]] ?? null;
   const match = cityAssetPathname(url)?.match(/^\/city(?:-opt)?\/([^/]+)\//);
   return match ? (FOLDER_TO_CITY_NAME[match[1]] ?? null) : null;
 }
@@ -281,6 +301,9 @@ export function cityImageList(city: string): string[] {
   );
   if (entry) {
     const folder = entry[1];
+    if (usesBundledCityAssets()) {
+      return bundledCityImages(folder);
+    }
     return CITY_IMAGES[folder].map((f) => resolveOptimalUrl(`/city/${folder}/${f}`));
   }
   // 未命中：用城市名生成确定性偏移，轮转全部图，保证稳定且不全是同一张

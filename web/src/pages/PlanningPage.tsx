@@ -4,7 +4,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, Link } from 'react-router-dom';
-import { UserMenu } from '@/components/layout/UserMenu';
+
 import gsap from 'gsap';
 import { ProgressTimeline } from '@/components/planning/ProgressTimeline';
 import { BoardingPass } from '@/components/planning/BoardingPass';
@@ -14,7 +14,7 @@ import {
   getCityPhotoUrls,
 } from '@/components/input/RotatingBackground';
 import { useTripStore } from '@/stores/tripStore';
-import { useAuthStore, broadcastAuthEvent } from '@/stores/authStore';
+
 import { useTripTaskStore } from '@/stores/tripTaskStore';
 import { pollJobStatus, submitTrip, fetchResult, ApiRequestError } from '@/services/api';
 import { savePendingSubmission, clearPendingSubmission } from '@/utils/pendingSubmission';
@@ -310,8 +310,6 @@ export default function PlanningPage() {
   const clearResult = useTripStore((s) => s.clearResult);
   const formData = useTripStore((s) => s.formData);
 
-  const refreshMe = useAuthStore((s) => s.refreshMe);
-
   // 级联恢复目的地，防止新标签页或刷新导致表单丢失回退为生硬的“目的地”
   const taskDestination = useTripTaskStore((s) => s.getTask(jobId ?? ''))?.destination;
   const destination = formData?.to_city || taskDestination || '当前目的地';
@@ -601,9 +599,6 @@ export default function PlanningPage() {
       }
 
       if (data.status === 'COMPLETED' && data.result_record_id) {
-        void refreshMe().then((ok) => {
-          if (ok) broadcastAuthEvent("ME_UPDATED");
-        });
         const recordId = data.result_record_id;
         const reduce = prefersReducedMotion();
         const prefetch = fetchResult(recordId, jobId!)
@@ -658,36 +653,23 @@ export default function PlanningPage() {
         if (data.error?.code === 'GENERATION_STATUS_TIMEOUT') {
           setUnknownState(true);
           setErrorMessage('暂时无法确认任务状态，任务可能仍在继续。');
-          void refreshMe();
           return false;
         }
 
-        void refreshMe().then((ok) => {
-          if (ok) {
-            const latestTrip = useAuthStore.getState().activeTrip;
-            if (!latestTrip || latestTrip.job_id !== jobId) {
-              setFailed(true);
-              setErrorMessage(webErrorMessage(data.error?.code, data.error?.message));
-              broadcastAuthEvent("ME_UPDATED");
-              return;
-            }
-          }
-          setUnknownState(true);
-          setErrorMessage('暂时无法确认任务状态，任务可能仍在继续。');
-        });
+        setFailed(true);
+        setErrorMessage(webErrorMessage(data.error?.code, data.error?.message));
         return true;
       }
 
       return false;
     },
-    [jobId, navigate, setJob, setResult, showPass, runMorphToPass, playPassGloss, refreshMe],
+    [jobId, navigate, setJob, setResult, showPass, runMorphToPass, playPassGloss],
   );
 
   const onTimeout = useCallback(() => {
     setUnknownState(true);
     setErrorMessage('暂时无法确认任务状态，任务可能仍在继续。');
-    void refreshMe();
-  }, [refreshMe]);
+  }, []);
 
   const onConsecutiveErrors = useCallback((count: number) => {
     setNetworkUnstable(count >= 3);
@@ -725,32 +707,14 @@ export default function PlanningPage() {
       const data = await pollJobStatus(jobId);
       if (data.status === 'COMPLETED' && data.result_record_id) {
         setUnknownState(false);
-        const ok = await refreshMe();
-        if (ok) broadcastAuthEvent("ME_UPDATED");
         navigate(`/result/${data.result_record_id}?job_id=${jobId}`, { replace: true });
         return;
       }
       if (data.status === 'FAILED' && data.error?.code !== 'GENERATION_STATUS_TIMEOUT') {
-        const ok = await refreshMe();
-        if (ok) {
-          const latestTrip = useAuthStore.getState().activeTrip;
-          if (!latestTrip || latestTrip.job_id !== jobId) {
-            setUnknownState(false);
-            setFailed(true);
-            setErrorMessage(webErrorMessage(data.error?.code, data.error?.message));
-            broadcastAuthEvent("ME_UPDATED");
-            return;
-          }
-        }
-      }
-      const ok = await refreshMe();
-      if (ok) {
-        const latestTrip = useAuthStore.getState().activeTrip;
-        if (latestTrip && latestTrip.job_id === jobId) {
-          setUnknownState(false);
-          setErrorMessage(null);
-          return;
-        }
+        setUnknownState(false);
+        setFailed(true);
+        setErrorMessage(webErrorMessage(data.error?.code, data.error?.message));
+        return;
       }
       setUnknownState(true);
       setErrorMessage('暂时无法确认任务状态，任务可能仍在继续。');
@@ -782,7 +746,6 @@ export default function PlanningPage() {
         notificationState: "none",
       });
       clearPendingSubmission();
-      await refreshMe();
       setFailed(false);
       setTimedOut(false);
       setUnknownState(false);
@@ -797,15 +760,7 @@ export default function PlanningPage() {
     } catch (err) {
       if (err instanceof ApiRequestError) {
         if (err.status === 409 && err.code === 'ACTIVE_TRIP_EXISTS') {
-          const refreshed = await refreshMe();
-          if (refreshed) {
-            const latestTrip = useAuthStore.getState().activeTrip;
-            if (latestTrip?.job_id) {
-              clearPendingSubmission();
-              navigate(`/planning/${latestTrip.job_id}`);
-              return;
-            }
-          }
+          setErrorMessage(err.message);
         } else if (
           err.status === 400 ||
           err.status === 422 ||
@@ -845,18 +800,7 @@ export default function PlanningPage() {
               <i className="fa-solid fa-compass text-gray-400 text-[11px]" />
               <span>行程规划</span>
             </Link>
-            <Link
-              to="/history"
-              className="inline-flex items-center gap-1.5 text-gray-600 hover:text-gray-900 px-3 py-1.5 rounded-lg hover:bg-sand-100 transition-colors"
-            >
-              <i className="fa-solid fa-map-location-dot text-gray-400 text-[11px]" />
-              <span>我的行程</span>
-            </Link>
           </nav>
-        </div>
-
-        <div className="flex items-center space-x-3">
-          <UserMenu />
         </div>
       </header>
 

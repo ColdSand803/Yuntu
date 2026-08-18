@@ -3,7 +3,6 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { useTripTaskStore } from "@/stores/tripTaskStore";
 import { useShareImageTaskStore } from "@/stores/shareImageTaskStore";
-import { useAuthStore } from "@/stores/authStore";
 import { TripTaskNotice } from "@/components/feedback/TripTaskNotice";
 import { ArtifactTaskNotice } from "@/components/feedback/ArtifactTaskNotice";
 import * as api from "@/services/api";
@@ -22,22 +21,6 @@ describe("Trip Generation Persistent Task Notification Tests (P1)", () => {
     vi.resetAllMocks();
     useTripTaskStore.getState().clearAllTasks();
     useShareImageTaskStore.getState().clearAllTasks();
-    useAuthStore.setState({
-      status: "authenticated",
-      user: {
-        user_id: "101",
-        display_name: "Tester",
-        display_name_change_available_at: null,
-        masked_email: "t***r@example.com",
-        linux_do_username: null,
-        email_login_enabled: true,
-        display_name_review_required: false,
-      },
-      quota: null,
-      activeTrip: null,
-      bootstrapped: true,
-      bootstrapError: null,
-    });
   });
 
   afterEach(() => {
@@ -120,7 +103,7 @@ describe("Trip Generation Persistent Task Notification Tests (P1)", () => {
     }
 
     render(
-      <MemoryRouter initialEntries={["/history"]}>
+      <MemoryRouter initialEntries={["/"]}>
         <LocationTracker />
         <TripTaskNotice />
       </MemoryRouter>
@@ -133,30 +116,6 @@ describe("Trip Generation Persistent Task Notification Tests (P1)", () => {
 
     expect(currentPath).toBe("/");
     expect(useTripTaskStore.getState().getTask("job_101")?.notificationState).toBe("acknowledged");
-  });
-
-  it("[P1-3] 账号切换或退出彻底清除旧账号攻略任务", () => {
-    useTripTaskStore.getState().initStore();
-
-    useTripTaskStore.setState({
-      tasks: {
-        job_100: {
-          accountId: "101",
-          jobId: "job_100",
-          destination: "京都",
-          startedAt: Date.now(),
-          status: "ready",
-          notificationState: "unread",
-        },
-      },
-    });
-
-    useAuthStore.setState({
-      status: "anonymous",
-      user: null,
-    });
-
-    expect(Object.keys(useTripTaskStore.getState().tasks).length).toBe(0);
   });
 
   it("[P1-4] 攻略任务与长图任务同时存在时，互不干扰、独立渲染", () => {

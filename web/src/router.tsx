@@ -2,13 +2,8 @@
 import { createBrowserRouter } from "react-router-dom";
 import { lazy, Suspense } from "react";
 import App from "./App";
-import { ProtectedRoute } from "./components/auth/ProtectedRoute";
 
 const InputPage = lazy(() => import("./pages/InputPage"));
-const LoginPage = lazy(() => import("./pages/LoginPage"));
-const AuthCallbackPage = lazy(() => import("./pages/AuthCallbackPage"));
-const HistoryPage = lazy(() => import("./pages/HistoryPage"));
-const ProfilePage = lazy(() => import("./pages/ProfilePage"));
 const PlanningPage = lazy(() => import("./pages/PlanningPage"));
 const ResultPage = lazy(() => import("./pages/ResultPage"));
 const PlanDetailPage = lazy(() => import("./pages/PlanDetailPage"));
@@ -18,6 +13,8 @@ const PlanDetailClassicPage = lazy(
   () => import("./pages/PlanDetailClassicPage"),
 );
 const NotFoundPage = lazy(() => import("./pages/NotFoundPage"));
+const DemoInputCapsule = lazy(() => import("./pages/demo/DemoInputCapsule"));
+const DemoPlanningPage = lazy(() => import("./pages/demo/DemoPlanningPage"));
 
 function LazyPage({ children }: { children: React.ReactNode }) {
   return (
@@ -34,11 +31,6 @@ function LazyPage({ children }: { children: React.ReactNode }) {
   );
 }
 
-const DemoInputCapsule = lazy(() => import("./pages/demo/DemoInputCapsule"));
-const DemoPlanningPage = lazy(() => import("./pages/demo/DemoPlanningPage"));
-const DemoHistoryPage = lazy(() => import("./pages/demo/DemoHistoryPage"));
-const DemoProfilePage = lazy(() => import("./pages/demo/DemoProfilePage"));
-
 const demoRoutes = [
   {
     path: "demo/input-capsule",
@@ -53,22 +45,6 @@ const demoRoutes = [
     element: (
       <LazyPage>
         <DemoPlanningPage />
-      </LazyPage>
-    ),
-  },
-  {
-    path: "demo/history",
-    element: (
-      <LazyPage>
-        <DemoHistoryPage />
-      </LazyPage>
-    ),
-  },
-  {
-    path: "demo/profile",
-    element: (
-      <LazyPage>
-        <DemoProfilePage />
       </LazyPage>
     ),
   },
@@ -112,69 +88,27 @@ export const router = createBrowserRouter([
         ),
       },
       {
-        path: "login",
-        element: (
-          <LazyPage>
-            <LoginPage />
-          </LazyPage>
-        ),
-      },
-      {
-        path: "auth/callback",
-        element: (
-          <LazyPage>
-            <AuthCallbackPage />
-          </LazyPage>
-        ),
-      },
-      {
-        path: "history",
-        element: (
-          <ProtectedRoute>
-            <LazyPage>
-              <HistoryPage />
-            </LazyPage>
-          </ProtectedRoute>
-        ),
-      },
-      {
-        path: "profile",
-        element: (
-          <ProtectedRoute>
-            <LazyPage>
-              <ProfilePage />
-            </LazyPage>
-          </ProtectedRoute>
-        ),
-      },
-      {
         path: "planning/:jobId",
         element: (
-          <ProtectedRoute>
-            <LazyPage>
-              <PlanningPage />
-            </LazyPage>
-          </ProtectedRoute>
+          <LazyPage>
+            <PlanningPage />
+          </LazyPage>
         ),
       },
       {
         path: "result/:resultId",
         element: (
-          <ProtectedRoute>
-            <LazyPage>
-              <ResultPage />
-            </LazyPage>
-          </ProtectedRoute>
+          <LazyPage>
+            <ResultPage />
+          </LazyPage>
         ),
       },
       {
         path: "plan/:resultId/:planId",
         element: (
-          <ProtectedRoute>
-            <LazyPage>
-              <PlanDetailPage />
-            </LazyPage>
-          </ProtectedRoute>
+          <LazyPage>
+            <PlanDetailPage />
+          </LazyPage>
         ),
       },
       ...demoRoutes,

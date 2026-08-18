@@ -593,6 +593,7 @@ CREATE TABLE travel_place_summary (
         CHECK (quality_score >= 0 AND quality_score <= 10),
     recommend_score     NUMERIC(3,1) NOT NULL DEFAULT 0
         CHECK (recommend_score >= 0 AND recommend_score <= 10),
+    cleaned_evidence    JSONB,
     updated_time        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -642,6 +643,10 @@ CREATE TABLE travel_plan_record (
     model_name      VARCHAR(50),
     quality_feedback TEXT,
     quality_metrics JSONB,
+    accommodation_name VARCHAR(200),
+    accommodation_lat NUMERIC(10,7),
+    accommodation_lng NUMERIC(10,7),
+    accommodation_source VARCHAR(40),
     created_time    TIMESTAMPTZ     NOT NULL DEFAULT NOW()
 );
 

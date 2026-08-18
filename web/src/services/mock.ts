@@ -1,177 +1,13 @@
 import type { AsyncSubmitResponse, JobResponse, TripResult } from "@/types/trip";
 import type { TripFormData } from "@/types/form";
-import type {
-  MeResponse,
-  SendCodeResponse,
-  ClosureSendCodeResponse,
-  HistoryResponse,
-  HistoryTripItem,
-} from "@/types/auth";
-import { ApiRequestError } from "./errors";
 
 const MOCK_JOB_ID = "mock-job-001";
 const MOCK_RESULT_ID = "mock-result-001";
 
 let pollCount = 0;
-let mockAuthenticated = true;
-let mockUserEmail = "user@example.com";
-const MOCK_QUOTA_LIMIT = 3;
-let mockQuotaRemaining = 3;
-let mockQuotaReserved = 0;
-let mockQuotaConsumed = 0;
-let mockActiveTrip: { trip_id: string; job_id: string; status: string } | null = null;
 
 export function resetMock() {
   pollCount = 0;
-}
-
-export function setMockAuthenticated(val: boolean) {
-  mockAuthenticated = val;
-}
-
-export async function mockGetMe(): Promise<MeResponse> {
-  await delay(150);
-  if (!mockAuthenticated) {
-    throw new ApiRequestError("AUTH_REQUIRED", "未登录或会话已过期", 401);
-  }
-  const prefix = mockUserEmail.split("@")[0] || "u";
-  const masked = prefix.length > 2 ? `${prefix[0]}***${prefix[prefix.length - 1]}@${mockUserEmail.split("@")[1] || "example.com"}` : `u***@${mockUserEmail.split("@")[1] || "example.com"}`;
-  return {
-    ok: true,
-    user: {
-      user_id: "usr_mock_123",
-      display_name: "公测体验官",
-      display_name_change_available_at: null,
-      masked_email: masked,
-      linux_do_username: null,
-      email_login_enabled: true,
-      display_name_review_required: false,
-    },
-    quota: {
-      policy: "beta_lifetime",
-      limit: MOCK_QUOTA_LIMIT,
-      reserved: mockQuotaReserved,
-      consumed: mockQuotaConsumed,
-      remaining: Math.max(0, MOCK_QUOTA_LIMIT - mockQuotaReserved - mockQuotaConsumed),
-      resets_at: null,
-    },
-    active_trip: mockActiveTrip,
-  };
-}
-
-export async function mockSendCode(mode: "login" | "register", email: string): Promise<SendCodeResponse> {
-  await delay(300);
-  mockUserEmail = email;
-  return {
-    ok: true,
-    challenge_id: `chal_${mode}_${Date.now()}`,
-    resend_after_seconds: 60,
-  };
-}
-
-export async function mockVerifyCode(challengeId: string, code: string): Promise<{ ok: boolean }> {
-  await delay(400);
-  if (code === "888888") {
-    // 模拟 409 模式纠偏测试
-    if (challengeId.includes("login")) {
-      throw new ApiRequestError("REGISTRATION_REQUIRED", "该邮箱尚未注册，请输入邀请码完成注册", 409);
-    } else {
-      throw new ApiRequestError("LOGIN_REQUIRED", "该邮箱已注册，已自动切至登录模式", 409);
-    }
-  }
-  if (code === "999999") {
-    throw new ApiRequestError("OTP_INVALID", "验证码错误或已失效", 400);
-  }
-  mockAuthenticated = true;
-  return { ok: true };
-}
-
-export async function mockLogout(): Promise<{ ok: boolean }> {
-  await delay(150);
-  mockAuthenticated = false;
-  mockActiveTrip = null;
-  return { ok: true };
-}
-
-export async function mockSendClosureCode(): Promise<ClosureSendCodeResponse> {
-  await delay(300);
-  return {
-    ok: true,
-    challenge_id: `chal_closure_${Date.now()}`,
-    resend_after_seconds: 60,
-  };
-}
-
-export async function mockConfirmClosure(_challengeId: string, _code: string): Promise<{ ok: boolean }> {
-  await delay(400);
-  if (mockActiveTrip) {
-    throw new ApiRequestError("ACTIVE_TRIP_IN_PROGRESS", "已有行程正在规划中，无法注销账号", 409);
-  }
-  mockAuthenticated = false;
-  return { ok: true };
-}
-
-export async function mockFetchHistory(): Promise<HistoryResponse> {
-  await delay(250);
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + 7 * 24 * 3600 * 1000).toISOString();
-  const items: HistoryTripItem[] = [
-    {
-      trip_id: "trip_mock_001",
-      job_id: MOCK_JOB_ID,
-      status: "SUCCESS",
-      city: "重庆",
-      days: 3,
-      result_record_id: MOCK_RESULT_ID,
-      created_at: new Date(now.getTime() - 3600 * 1000).toISOString(),
-      finished_at: new Date(now.getTime() - 3500 * 1000).toISOString(),
-      expires_from_history_at: expiresAt,
-      retry_input: {
-        trip_request: {
-          to_city: "重庆",
-          start_date: "2026-08-01",
-          end_date: "2026-08-03",
-          days: 3,
-          people_count: 2,
-          preferences: ["美食", "citywalk"],
-          avoid: [],
-          notes: "",
-          budget: 5000,
-        },
-      },
-      error: null,
-    },
-    {
-      trip_id: "trip_mock_002",
-      job_id: "mock-job-002",
-      status: "FAILED",
-      city: "成都",
-      days: 2,
-      result_record_id: null,
-      created_at: new Date(now.getTime() - 86400 * 1000).toISOString(),
-      finished_at: new Date(now.getTime() - 86300 * 1000).toISOString(),
-      expires_from_history_at: expiresAt,
-      retry_input: {
-        trip_request: {
-          to_city: "成都",
-          start_date: "2026-08-01",
-          end_date: "2026-08-02",
-          days: 2,
-          people_count: 1,
-          preferences: ["美食", "文化历史"],
-          avoid: [],
-          notes: "想看大熊猫",
-          budget: 3000,
-        },
-      },
-      error: {
-        code: "GENERATION_TIMEOUT",
-        message: "生成服务超时，额度已自动退还",
-        retryable: true,
-      },
-    },
-  ];
-  return { ok: true, items, next_cursor: null };
 }
 
 export async function mockSubmitTrip(
@@ -179,14 +15,6 @@ export async function mockSubmitTrip(
 ): Promise<AsyncSubmitResponse> {
   resetMock();
   await delay(400);
-
-  if (mockActiveTrip) {
-    throw new ApiRequestError("ACTIVE_TRIP_EXISTS", "当前已有进行中的行程规划", 409);
-  }
-
-  if (mockQuotaRemaining <= 0) {
-    throw new ApiRequestError("QUOTA_EXHAUSTED", `公测额度已耗尽 (0/${MOCK_QUOTA_LIMIT})`, 429);
-  }
 
   if (formData.accommodation?.name) {
     MOCK_RESULT.plans.forEach((plan) => {
@@ -198,8 +26,6 @@ export async function mockSubmitTrip(
       };
     });
   }
-  mockActiveTrip = { trip_id: "trip_mock_new", job_id: MOCK_JOB_ID, status: "RUNNING" };
-  mockQuotaReserved = 1;
   return { ok: true, job_id: MOCK_JOB_ID };
 }
 
@@ -221,11 +47,6 @@ export async function mockPollJobStatus(
   if (pollCount <= 8) {
     return { ok: true, job_id: MOCK_JOB_ID, status: "RUNNING", stage_progress: { code: "FINALIZING", step: 4, total: 4 }, result_record_id: null, error: null };
   }
-
-  mockActiveTrip = null;
-  mockQuotaReserved = 0;
-  mockQuotaConsumed += 1;
-  mockQuotaRemaining = Math.max(0, mockQuotaRemaining - 1);
 
   return { ok: true, job_id: MOCK_JOB_ID, status: "COMPLETED", stage_progress: { code: "FINALIZING", step: 4, total: 4 }, result_record_id: MOCK_RESULT_ID, error: null };
 }

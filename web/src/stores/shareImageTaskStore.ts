@@ -1,6 +1,5 @@
 import { create } from "zustand";
 import { getArtifact, createArtifact, fetchArtifactBlob, ApiRequestError } from "@/services/api";
-import { useAuthStore } from "@/stores/authStore";
 
 const LOCAL_STORAGE_KEY = "yuntu_share_image_tasks";
 const MAX_OBSERVATION_MS = 8 * 60 * 1000; // 8 分钟客户端观察超时 (对应 yuntu-travel 420s 超时)
@@ -150,10 +149,8 @@ interface ShareImageTaskStoreState {
 
 let pollingTimer: ReturnType<typeof setInterval> | null = null;
 let initialized = false;
-let authSubscribed = false;
 let checkInFlight = false; // 轮询防重入全局锁
 let currentEpoch = 0; // 全局 Store 生命周期 Epoch
-let lastUserId: string | null = null;
 
 // 并发请求防重入 in-flight Promise Map
 const inFlightMap = new Map<string, Promise<StoredTask>>();
@@ -237,24 +234,7 @@ function saveToLocalStorage(tasks: Record<string, StoredTask>) {
   }
 }
 
-function setupAuthListener() {
-  if (authSubscribed) return;
-  authSubscribed = true;
 
-  useAuthStore.subscribe((state) => {
-    if (state.status === "anonymous") {
-      lastUserId = null;
-      useShareImageTaskStore.getState().clearAllTasks();
-    } else if (state.status === "authenticated" && state.user?.user_id) {
-      const currentUserId = String(state.user.user_id);
-      if (lastUserId !== null && lastUserId !== currentUserId) {
-        // 明确的用户 ID 变更 -> 跨账号清除旧任务
-        useShareImageTaskStore.getState().clearAllTasks();
-      }
-      lastUserId = currentUserId;
-    }
-  });
-}
 
 async function processBackendReadyTask(
   recordId: string,
@@ -383,8 +363,6 @@ export const useShareImageTaskStore = create<ShareImageTaskStoreState>(
     activePolling: false,
 
     initStore: () => {
-      setupAuthListener();
-
       if (initialized) return;
       initialized = true;
 

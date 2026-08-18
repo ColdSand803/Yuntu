@@ -3,7 +3,6 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { SafeDeliveryNotice } from "@/components/result/SafeDeliveryNotice";
 import * as api from "@/services/api";
-import { useAuthStore } from "@/stores/authStore";
 import { useTripStore } from "@/stores/tripStore";
 import { useTripTaskStore } from "@/stores/tripTaskStore";
 import type { TripFormData } from "@/types/form";
@@ -12,7 +11,6 @@ vi.mock("@/services/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/services/api")>();
   return {
     ...actual,
-    getHistoryTrips: vi.fn(),
     submitTrip: vi.fn(),
   };
 });
@@ -67,23 +65,6 @@ describe("v0.9.5 safe delivery notice", () => {
     sessionStorage.clear();
     useTripTaskStore.getState().clearAllTasks();
     useTripStore.getState().reset();
-    useAuthStore.setState({
-      status: "authenticated",
-      user: {
-        user_id: "user-1",
-        display_name: "测试用户",
-        display_name_change_available_at: null,
-        masked_email: "t***@example.com",
-        linux_do_username: null,
-        email_login_enabled: true,
-        display_name_review_required: false,
-      },
-      quota: null,
-      activeTrip: null,
-      bootstrapped: true,
-      bootstrapError: null,
-      refreshMe: vi.fn().mockResolvedValue(true),
-    });
   });
 
   it.each([
@@ -110,26 +91,8 @@ describe("v0.9.5 safe delivery notice", () => {
     expect(document.body.textContent).not.toMatch(/safe|DEGRADED|Review/i);
   });
 
-  it("reuses the real history input and submits a new generation task", async () => {
-    vi.mocked(api.getHistoryTrips).mockResolvedValue({
-      ok: true,
-      items: [
-        {
-          trip_id: "trip-old",
-          job_id: "job-old",
-          status: "SUCCESS",
-          city: "重庆",
-          days: 1,
-          result_record_id: 501,
-          created_at: "2026-08-05T00:00:00Z",
-          finished_at: "2026-08-05T00:01:00Z",
-          expires_from_history_at: "2026-08-12T00:00:00Z",
-          retry_input: { trip_request: requestData },
-          error: null,
-        },
-      ],
-      next_cursor: null,
-    });
+  it("reuses the stored form input and submits a new generation task", async () => {
+    useTripStore.getState().setFormData(requestData);
     vi.mocked(api.submitTrip).mockResolvedValue({
       ok: true,
       job_id: "job-new",

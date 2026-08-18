@@ -1,4 +1,10 @@
-import { resolveCityAssetVariant, withCityAssetBase } from "@/config/cityAssets";
+import {
+  BUNDLED_FALLBACK_IMAGE,
+  bundledCityImages,
+  resolveCityAssetVariant,
+  usesBundledCityAssets,
+  withCityAssetBase,
+} from "@/config/cityAssets";
 
 export const CITY_IMAGES: Record<string, string[]> = {
   beijing: [
@@ -276,6 +282,10 @@ export function getCityPostcardCover(city: string, seedKey = "default"): string 
   const cleanCity = city.trim().replace(/市$/, "");
   const folder = CITY_NAME_TO_FOLDER[cleanCity] || CITY_NAME_TO_FOLDER[city];
 
+  if (usesBundledCityAssets()) {
+    return folder ? bundledCityImages(folder)[0] : BUNDLED_FALLBACK_IMAGE;
+  }
+
   if (folder && CITY_IMAGES[folder]?.length) {
     const images = CITY_IMAGES[folder];
     // 简单的字符串哈希，让不同 trip_id 分配到同一城市不同的真实风光图
@@ -290,19 +300,23 @@ export function getCityPostcardCover(city: string, seedKey = "default"): string 
   }
 
   // 默认兜底图
-  return withCityAssetBase("/hero-bg.jpg");
+  return withCityAssetBase(BUNDLED_FALLBACK_IMAGE);
 }
 
 export function getCityAllCovers(city: string): string[] {
   const cleanCity = city.trim().replace(/市$/, "");
   const folder = CITY_NAME_TO_FOLDER[cleanCity] || CITY_NAME_TO_FOLDER[city];
 
+  if (usesBundledCityAssets()) {
+    return folder ? bundledCityImages(folder) : [BUNDLED_FALLBACK_IMAGE];
+  }
+
   if (folder && CITY_IMAGES[folder]?.length) {
     return CITY_IMAGES[folder].map((img) =>
       resolveCityAssetVariant(`/city/${folder}/${img}`, { format: "webp" })
     );
   }
-  return [withCityAssetBase("/hero-bg.jpg")];
+  return [withCityAssetBase(BUNDLED_FALLBACK_IMAGE)];
 }
 
 export function getCityPostcardMeta(city: string) {

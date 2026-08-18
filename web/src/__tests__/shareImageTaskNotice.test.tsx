@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import { useShareImageTaskStore } from "@/stores/shareImageTaskStore";
-import { useAuthStore } from "@/stores/authStore";
 import { ArtifactTaskNotice } from "@/components/feedback/ArtifactTaskNotice";
 import { ShareDialog } from "@/components/share/ShareDialog";
 import * as api from "@/services/api";
@@ -23,22 +22,6 @@ describe("AI Share Image Persistent Notification & Acceptance Tests", () => {
     localStorage.clear();
     vi.resetAllMocks();
     useShareImageTaskStore.getState().clearAllTasks();
-    useAuthStore.setState({
-      status: "authenticated",
-      user: {
-        user_id: "101",
-        display_name: "Tester",
-        display_name_change_available_at: null,
-        masked_email: "t***r@example.com",
-        linux_do_username: null,
-        email_login_enabled: true,
-        display_name_review_required: false,
-      },
-      quota: null,
-      activeTrip: null,
-      bootstrapped: true,
-      bootstrapError: null,
-    });
   });
 
   afterEach(() => {
@@ -143,7 +126,7 @@ describe("AI Share Image Persistent Notification & Acceptance Tests", () => {
     expect(screen.getByText("AI 长图已生成")).toBeInTheDocument();
 
     rerender(
-      <MemoryRouter initialEntries={["/history"]}>
+      <MemoryRouter initialEntries={["/"]}>
         <ArtifactTaskNotice />
       </MemoryRouter>
     );
@@ -735,8 +718,8 @@ describe("AI Share Image Persistent Notification & Acceptance Tests", () => {
     expect(task?.jobId).toBe(testJobId);
   });
 
-  // Scenario 20: legacy task 缺 jobId 时跳到 /history，不产生损坏 URL
-  it("[20] legacy task 缺 jobId 时跳到 /history，不产生损坏 URL", () => {
+  // Scenario 20: legacy task 缺 jobId 时跳到首页，不产生损坏 URL
+  it("[20] legacy task 缺 jobId 时跳到首页，不产生损坏 URL", () => {
     useShareImageTaskStore.setState({
       tasks: {
         "2254": {
@@ -767,7 +750,7 @@ describe("AI Share Image Persistent Notification & Acceptance Tests", () => {
     const viewBtn = screen.getByText("查看长图");
     fireEvent.click(viewBtn);
 
-    expect(currentPath).toBe("/history");
+    expect(currentPath).toBe("/");
     expect(currentPath).not.toContain("/result/2254");
   });
 

@@ -5,7 +5,7 @@
  */
 import { useEffect, useMemo, useState, lazy, Suspense, useRef } from "react";
 import { useNavigate, useParams, useSearchParams, Link } from "react-router-dom";
-import { UserMenu } from "@/components/layout/UserMenu";
+
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { DetailSkeleton } from "@/components/skeleton/DetailSkeleton";
@@ -17,6 +17,7 @@ import { AccommodationTimelineNode } from "@/components/detail/AccommodationCard
 import { ShareDialog } from "@/components/share/ShareDialog";
 import { useTripStore } from "@/stores/tripStore";
 import { fetchResult, ApiRequestError } from "@/services/api";
+
 import { CostEstimateCard } from "@/components/detail/CostEstimateCard";
 import { MustIncludeNotice } from "@/components/detail/MustIncludeNotice";
 import { SafeDeliveryNotice } from "@/components/result/SafeDeliveryNotice";
@@ -130,7 +131,6 @@ export default function PlanDetailPage() {
 
   const [isScrolled, setIsScrolled] = useState(false);
   const leftBrandRef = useRef<HTMLDivElement>(null);
-  const rightUserMenuRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -142,7 +142,7 @@ export default function PlanDetailPage() {
   }, []);
 
   useEffect(() => {
-    if (!leftBrandRef.current || !rightUserMenuRef.current) return;
+    if (!leftBrandRef.current) return;
     const isMobile = window.innerWidth < 768;
     if (isMobile) return;
 
@@ -155,26 +155,10 @@ export default function PlanDetailPage() {
         ease: "back.out(1.4)",
         overwrite: "auto",
       });
-      gsap.to(rightUserMenuRef.current, {
-        opacity: 1,
-        x: 0,
-        scale: 1,
-        duration: 0.45,
-        ease: "back.out(1.4)",
-        overwrite: "auto",
-      });
     } else {
       gsap.to(leftBrandRef.current, {
         opacity: 0,
         x: -16,
-        scale: 0.9,
-        duration: 0.25,
-        ease: "power2.in",
-        overwrite: "auto",
-      });
-      gsap.to(rightUserMenuRef.current, {
-        opacity: 0,
-        x: 16,
         scale: 0.9,
         duration: 0.25,
         ease: "power2.in",
@@ -287,8 +271,7 @@ export default function PlanDetailPage() {
       pdf.reset();
     } else if (pdf.phase === "failed" && pdf.error) {
       if (pdf.error.code === "AUTH_REQUIRED" || pdf.error.code === "401") {
-        showToast("请先登录账号后导出 PDF", "error");
-        navigate(`/login?returnTo=${encodeURIComponent(window.location.pathname + window.location.search)}`);
+        showToast("当前环境不支持账号导出，请稍后重试或检查后端配置", "error");
       } else {
         showToast(`PDF 导出失败: ${pdf.error.message}`, "error");
       }
@@ -498,17 +481,8 @@ export default function PlanDetailPage() {
               <i className="fa-solid fa-compass text-gray-400 text-[11px]" />
               <span>行程规划</span>
             </Link>
-            <Link
-              to="/history"
-              className="inline-flex items-center gap-1.5 text-gray-600 hover:text-gray-900 px-3 py-1.5 rounded-lg hover:bg-sand-100 transition-colors"
-            >
-              <i className="fa-solid fa-map-location-dot text-gray-400 text-[11px]" />
-              <span>我的行程</span>
-            </Link>
           </div>
         </div>
-
-        <UserMenu />
       </nav>
 
       {/* Hero */}
@@ -597,13 +571,6 @@ export default function PlanDetailPage() {
                 <i className="fa-solid fa-compass text-gray-400 text-[11px]" />
                 <span>行程规划</span>
               </Link>
-              <Link
-                to="/history"
-                className="inline-flex items-center gap-1.5 text-gray-600 hover:text-gray-900 px-2.5 py-1 rounded-lg hover:bg-sand-100 transition-colors"
-              >
-                <i className="fa-solid fa-map-location-dot text-gray-400 text-[11px]" />
-                <span>我的行程</span>
-              </Link>
             </div>
           </div>
 
@@ -634,7 +601,7 @@ export default function PlanDetailPage() {
             </div>
           </div>
 
-          {/* 右侧：动作按钮 (PDF / 分享) + 桌面端 GSAP 物理弹性滑出 UserMenu */}
+          {/* 右侧：动作按钮 (PDF / 分享) */}
           <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
             <button
               type="button"
@@ -660,14 +627,6 @@ export default function PlanDetailPage() {
               <span className="sm:hidden">分享</span>
             </button>
 
-            {/* 桌面端向下滚动后，GSAP 物理弹性滑出 UserMenu */}
-            <div
-              ref={rightUserMenuRef}
-              className="hidden border-l border-gray-200/80 pl-2.5 opacity-0 md:block"
-              style={{ transform: "translateX(16px) scale(0.9)" }}
-            >
-              <UserMenu />
-            </div>
           </div>
         </div>
       </div>

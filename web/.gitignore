@@ -5,8 +5,8 @@ dist
 .env.*.local
 *.log
 
-# City image binaries are owned by R2/CDN. Local asset-workflow checkouts may
-# sync these directories temporarily, but they must never enter Web Git/builds.
+# Full city photo libraries stay on R2/CDN. Do not commit those trees.
+# public/bundled/ is the OSS fallback (Chongqing) and should stay tracked.
 public/city/
 public/city-opt/
 

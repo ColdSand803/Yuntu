@@ -6,7 +6,6 @@ import { Toast } from "./components/feedback/Toast";
 import { ArtifactTaskNotice } from "./components/feedback/ArtifactTaskNotice";
 import { TripTaskNotice } from "./components/feedback/TripTaskNotice";
 import { useOnline } from "./hooks/useOnline";
-import { useAuthStore } from "./stores/authStore";
 import { useShareImageTaskStore } from "./stores/shareImageTaskStore";
 import { useTripTaskStore } from "./stores/tripTaskStore";
 
@@ -14,9 +13,6 @@ import { useTripTaskStore } from "./stores/tripTaskStore";
 function isImmersiveRoute(pathname: string): boolean {
   return (
     pathname === "/" ||
-    pathname === "/history" ||
-    pathname === "/profile" ||
-    pathname === "/login" ||
     pathname.startsWith("/planning/") ||
     pathname.startsWith("/plan/") ||
     pathname.startsWith("/demo/")
@@ -27,16 +23,13 @@ export default function App() {
   const online = useOnline();
   const location = useLocation();
   const immersive = isImmersiveRoute(location.pathname);
-  const bootstrap = useAuthStore((s) => s.bootstrap);
   const initShareImageStore = useShareImageTaskStore((s) => s.initStore);
   const initTripTaskStore = useTripTaskStore((s) => s.initStore);
 
-  // 应用启动触发 authStore 初始化与后台轮询服务初始化
   useEffect(() => {
-    void bootstrap();
     initShareImageStore();
     initTripTaskStore();
-  }, [bootstrap, initShareImageStore, initTripTaskStore]);
+  }, [initShareImageStore, initTripTaskStore]);
 
   // 路由切换时自动重置滚动条至顶部，避免详情页返回首页时视口停留在下方导致表单被拉上去
   useEffect(() => {

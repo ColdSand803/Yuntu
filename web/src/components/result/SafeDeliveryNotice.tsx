@@ -1,13 +1,13 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { getHistoryTrips, submitTrip, ApiRequestError } from "@/services/api";
-import { useAuthStore } from "@/stores/authStore";
+import { submitTrip, ApiRequestError } from "@/services/api";
 import { useTripStore } from "@/stores/tripStore";
 import { useTripTaskStore } from "@/stores/tripTaskStore";
 import type { TripFormData } from "@/types/form";
 import type { TripResult } from "@/types/trip";
 import {
   clearPendingSubmission,
+  getPendingSubmission,
   savePendingSubmission,
 } from "@/utils/pendingSubmission";
 
@@ -21,18 +21,12 @@ function shouldShowSafeDeliveryNotice(
   );
 }
 
-async function findRetryInput(jobId: string): Promise<TripFormData | null> {
-  let cursor: string | undefined;
-
-  do {
-    const response = await getHistoryTrips({ cursor, limit: 50 });
-    const matched = response.items.find((item) => item.job_id === jobId);
-    if (matched?.retry_input?.trip_request)
-      return matched.retry_input.trip_request;
-    cursor = response.next_cursor ?? undefined;
-  } while (cursor);
-
-  return null;
+function findRetryInput(): TripFormData | null {
+  return (
+    useTripStore.getState().formData ??
+    getPendingSubmission()?.trip_request ??
+    null
+  );
 }
 
 interface SafeDeliveryNoticeProps {
@@ -44,7 +38,6 @@ export function SafeDeliveryNotice({ result, jobId }: SafeDeliveryNoticeProps) {
   const navigate = useNavigate();
   const setFormData = useTripStore((state) => state.setFormData);
   const clearResult = useTripStore((state) => state.clearResult);
-  const refreshMe = useAuthStore((state) => state.refreshMe);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -56,9 +49,9 @@ export function SafeDeliveryNotice({ result, jobId }: SafeDeliveryNoticeProps) {
     setError(null);
 
     try {
-      const requestData = await findRetryInput(jobId);
+      const requestData = findRetryInput();
       if (!requestData) {
-        setError("暂时无法读取原行程条件，请从“我的行程”重试。");
+        setError("暂时无法读取原行程条件，请回到首页重新填写。");
         return;
       }
 
@@ -77,25 +70,9 @@ export function SafeDeliveryNotice({ result, jobId }: SafeDeliveryNoticeProps) {
           notificationState: "none",
         });
         clearPendingSubmission();
-        await refreshMe();
         navigate(`/planning/${response.job_id}`);
       } catch (submissionError: unknown) {
         if (submissionError instanceof ApiRequestError) {
-          if (
-            submissionError.status === 409 &&
-            submissionError.code === "ACTIVE_TRIP_EXISTS"
-          ) {
-            const refreshed = await refreshMe();
-            const activeTrip = refreshed
-              ? useAuthStore.getState().activeTrip
-              : null;
-            if (activeTrip?.job_id) {
-              clearPendingSubmission();
-              navigate(`/planning/${activeTrip.job_id}`);
-              return;
-            }
-          }
-
           if (
             submissionError.status === 400 ||
             submissionError.status === 422 ||
@@ -104,7 +81,6 @@ export function SafeDeliveryNotice({ result, jobId }: SafeDeliveryNoticeProps) {
               "REQUEST_ID_CONFLICT",
               "CITY_NOT_SUPPORTED",
               "VALIDATION_ERROR",
-              "QUOTA_EXHAUSTED",
             ].includes(submissionError.code)
           ) {
             clearPendingSubmission();
@@ -114,12 +90,6 @@ export function SafeDeliveryNotice({ result, jobId }: SafeDeliveryNoticeProps) {
           setError("发起重新生成失败，请检查网络设置。");
         }
       }
-    } catch (historyError: unknown) {
-      setError(
-        historyError instanceof ApiRequestError
-          ? historyError.message
-          : "暂时无法读取原行程条件，请稍后重试。",
-      );
     } finally {
       setSubmitting(false);
     }

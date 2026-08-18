@@ -1,14 +1,12 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { DemoSwitcher } from "@/components/demo/DemoSwitcher";
-import { UserMenu } from "@/components/layout/UserMenu";
 import {
   useRotatingBackground,
   cityNameOfImage,
 } from "@/components/input/RotatingBackground";
 import { submitTrip, fetchHotPlaces, type HotPlace, ApiRequestError } from "@/services/api";
 import { useTripStore } from "@/stores/tripStore";
-import { useAuthStore } from "@/stores/authStore";
 import { useTripTaskStore } from "@/stores/tripTaskStore";
 import {
   savePendingSubmission,
@@ -254,11 +252,6 @@ export default function DemoInputCapsule() {
   const navigate = useNavigate();
   const setFormData = useTripStore((s) => s.setFormData);
   const clearResult = useTripStore((s) => s.clearResult);
-  const authStatus = useAuthStore((s) => s.status);
-  const user = useAuthStore((s) => s.user);
-  const quota = useAuthStore((s) => s.quota);
-  const activeTrip = useAuthStore((s) => s.activeTrip);
-  const refreshMe = useAuthStore((s) => s.refreshMe);
 
   // 恢复历史暂存
   const stored = useMemo(() => useTripStore.getState().formData, []);
@@ -411,27 +404,6 @@ export default function DemoInputCapsule() {
     setFormData(formData);
     clearResult();
 
-    // 游客态拦截
-    if (authStatus !== "authenticated") {
-      savePendingSubmission(formData);
-      navigate("/login?returnTo=/");
-      return;
-    }
-
-    // 额度校验
-    if (quota && quota.remaining <= 0) {
-      const limitSuffix = typeof quota.limit === "number" ? ` (0/${quota.limit})` : "";
-      setSubmitError(`公测免费额度已耗尽${limitSuffix}，无法创建新行程`);
-      return;
-    }
-
-    // 活动任务拦截
-    if (activeTrip) {
-      setSubmitError("你已有正在生成的行程任务，请等待完成");
-      navigate(`/planning/${activeTrip.job_id}`);
-      return;
-    }
-
     const pending = savePendingSubmission(formData);
     setSubmitting(true);
     setSubmitError(null);
@@ -447,25 +419,11 @@ export default function DemoInputCapsule() {
         notificationState: "none",
       });
       clearPendingSubmission();
-      await refreshMe();
       navigate(`/planning/${res.job_id}`);
     } catch (err: unknown) {
-      if (err instanceof ApiRequestError) {
-        if (err.status === 409 && err.code === "ACTIVE_TRIP_EXISTS") {
-          const refreshed = await refreshMe();
-          if (refreshed) {
-            const latestTrip = useAuthStore.getState().activeTrip;
-            if (latestTrip?.job_id) {
-              clearPendingSubmission();
-              navigate(`/planning/${latestTrip.job_id}`);
-              return;
-            }
-          }
-        }
-        setSubmitError(err.message);
-      } else {
-        setSubmitError("提交失败，请检查网络后重试");
-      }
+      setSubmitError(
+        err instanceof ApiRequestError ? err.message : "提交失败，请检查网络后重试",
+      );
       setSubmitting(false);
     }
   };
@@ -495,42 +453,6 @@ export default function DemoInputCapsule() {
             </span>
           </Link>
 
-          {authStatus === "authenticated" && (
-            <Link
-              to="/demo/history"
-              className="hidden sm:inline-flex items-center gap-1.5 text-xs font-semibold text-white/80 hover:text-white transition-colors bg-white/10 px-3 py-1.5 rounded-lg backdrop-blur-md border border-white/10"
-            >
-              <i className="fa-solid fa-map-location-dot text-emerald-400" />
-              <span>我的行程</span>
-            </Link>
-          )}
-        </div>
-
-        {/* 右侧：登录状态 / 额度 / 用户菜单 */}
-        <div className="flex items-center space-x-4">
-          {authStatus === "authenticated" && user ? (
-            <div className="flex items-center gap-3">
-              {quota && (
-                <Link
-                  to="/demo/profile"
-                  className="hidden sm:flex items-center gap-1.5 rounded-full bg-emerald-950/70 border border-emerald-500/40 px-3 py-1 text-xs font-bold text-emerald-300 backdrop-blur-md"
-                  title="剩余可用 AI 定制额度"
-                >
-                  <i className="fa-solid fa-bolt text-[11px]" />
-                  <span>{quota.remaining} / {quota.limit} 次</span>
-                </Link>
-              )}
-
-              <UserMenu />
-            </div>
-          ) : (
-            <Link
-              to="/login?returnTo=/"
-              className="rounded-xl bg-white/20 hover:bg-white/30 border border-white/30 px-4 py-1.5 text-xs font-bold text-white backdrop-blur-md transition-all shadow-sm"
-            >
-              登录 / 注册
-            </Link>
-          )}
         </div>
       </header>
 

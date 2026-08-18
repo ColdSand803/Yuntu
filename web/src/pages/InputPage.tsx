@@ -3,14 +3,12 @@
  */
 import { useState, useMemo, useEffect, useRef } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { UserMenu } from "@/components/layout/UserMenu";
 import {
   useRotatingBackground,
   cityNameOfImage,
 } from "@/components/input/RotatingBackground";
 import { submitTrip, fetchHotPlaces, type HotPlace, ApiRequestError } from "@/services/api";
 import { useTripStore } from "@/stores/tripStore";
-import { useAuthStore } from "@/stores/authStore";
 import { useTripTaskStore } from "@/stores/tripTaskStore";
 import {
   getPendingSubmission,
@@ -18,6 +16,7 @@ import {
   clearPendingSubmission,
 } from "@/utils/pendingSubmission";
 import type { TripFormData, MustIncludeItem, RequestedCommuteMode } from "@/types/form";
+import { usesBundledCityAssets } from "@/config/cityAssets";
 
 const SUPPORTED_CITIES = [
   { name: "杭州", tag: "烟雨江南 · 西子湖畔" },
@@ -257,12 +256,6 @@ export default function InputPage() {
   const navigate = useNavigate();
   const setFormData = useTripStore((s) => s.setFormData);
   const clearResult = useTripStore((s) => s.clearResult);
-  const authStatus = useAuthStore((s) => s.status);
-  const user = useAuthStore((s) => s.user);
-  const quota = useAuthStore((s) => s.quota);
-  const activeTrip = useAuthStore((s) => s.activeTrip);
-  const refreshMe = useAuthStore((s) => s.refreshMe);
-
   // 恢复历史暂存
   const stored = useMemo(() => {
     const fromStore = useTripStore.getState().formData;
@@ -338,7 +331,7 @@ export default function InputPage() {
 
   const { current: bgImage, incoming: bgIncoming } = useRotatingBackground([city]);
   const polaroidCity = cityNameOfImage(bgImage);
-  const displayCity = polaroidCity || city;
+  const displayCity = usesBundledCityAssets() ? city : polaroidCity || city;
   const currentCityMeta = SUPPORTED_CITIES.find((c) => c.name === city);
 
   // 计算天数
@@ -351,20 +344,7 @@ export default function InputPage() {
 
   const isDaysOverLimit = days > 7;
 
-  // 额度与提交按钮文案判断（严格遵守测试与业务事实）
-  const isExhausted = Boolean(authStatus === "authenticated" && quota && quota.remaining <= 0);
-  const isQuotaLoading = Boolean(authStatus === "authenticated" && quota === null);
-
-  const submitButtonText = useMemo(() => {
-    if (submitting) return "定制中...";
-    if (isExhausted) {
-      return typeof quota?.limit === "number"
-        ? `公测额度已耗尽 (0/${quota.limit})`
-        : "公测额度已耗尽";
-    }
-    if (isQuotaLoading) return "额度读取中...";
-    return "帮我排行程";
-  }, [submitting, isExhausted, isQuotaLoading, quota?.limit]);
+  const submitButtonText = submitting ? "定制中..." : "帮我排行程";
 
   // 点击空白区域关闭浮动面板
   useEffect(() => {
@@ -434,33 +414,6 @@ export default function InputPage() {
     setFormData(formData);
     clearResult();
 
-    // 游客态拦截
-    if (authStatus !== "authenticated") {
-      savePendingSubmission(formData);
-      navigate("/login?returnTo=/");
-      return;
-    }
-
-    // 额度加载中校验
-    if (quota === null) {
-      setSubmitError("额度读取中，请稍后重试");
-      return;
-    }
-
-    // 额度校验
-    if (quota.remaining <= 0) {
-      const limitSuffix = typeof quota.limit === "number" ? ` (0/${quota.limit})` : "";
-      setSubmitError(`公测免费额度已耗尽${limitSuffix}，无法创建新行程`);
-      return;
-    }
-
-    // 活动任务拦截
-    if (activeTrip) {
-      setSubmitError("你已有正在生成的行程任务，请等待完成");
-      navigate(`/planning/${activeTrip.job_id}`);
-      return;
-    }
-
     const pending = savePendingSubmission(formData);
     setSubmitting(true);
     setSubmitError(null);
@@ -476,25 +429,11 @@ export default function InputPage() {
         notificationState: "none",
       });
       clearPendingSubmission();
-      await refreshMe();
       navigate(`/planning/${res.job_id}`);
     } catch (err: unknown) {
-      if (err instanceof ApiRequestError) {
-        if (err.status === 409 && err.code === "ACTIVE_TRIP_EXISTS") {
-          const refreshed = await refreshMe();
-          if (refreshed) {
-            const latestTrip = useAuthStore.getState().activeTrip;
-            if (latestTrip?.job_id) {
-              clearPendingSubmission();
-              navigate(`/planning/${latestTrip.job_id}`);
-              return;
-            }
-          }
-        }
-        setSubmitError(err.message);
-      } else {
-        setSubmitError("提交失败，请检查网络后重试");
-      }
+      setSubmitError(
+        err instanceof ApiRequestError ? err.message : "提交失败，请检查网络后重试",
+      );
       setSubmitting(false);
     }
   };
@@ -532,32 +471,7 @@ export default function InputPage() {
               <i className="fa-solid fa-compass text-emerald-400 text-[11px]" />
               <span>行程规划</span>
             </Link>
-            {authStatus === "authenticated" && (
-              <Link
-                to="/history"
-                className="inline-flex items-center gap-1.5 text-white/80 hover:text-white transition-colors bg-white/10 hover:bg-white/15 px-3 py-1.5 rounded-lg backdrop-blur-md border border-white/10"
-              >
-                <i className="fa-solid fa-map-location-dot text-emerald-400 text-[11px]" />
-                <span>我的行程</span>
-              </Link>
-            )}
           </nav>
-        </div>
-
-        {/* 右侧：登录状态 / 用户菜单（含权威额度胶囊） */}
-        <div className="flex items-center space-x-4">
-          {authStatus === "authenticated" && user ? (
-            <div className="flex items-center gap-3">
-              <UserMenu />
-            </div>
-          ) : (
-            <Link
-              to="/login?returnTo=/"
-              className="rounded-xl bg-white/20 hover:bg-white/30 border border-white/30 px-4 py-1.5 text-xs font-bold text-white backdrop-blur-md transition-all shadow-sm"
-            >
-              登录 / 注册
-            </Link>
-          )}
         </div>
       </header>
 
@@ -683,12 +597,8 @@ export default function InputPage() {
             {/* 提交行动按钮 */}
             <button
               type="submit"
-              disabled={submitting || isExhausted || isQuotaLoading}
-              className={`mt-2 lg:mt-0 lg:ml-2 flex w-full lg:w-auto h-12 items-center justify-center gap-2 rounded-xl lg:rounded-full px-6 text-sm font-bold shadow-md shadow-accent-500/25 transition-all shrink-0 ${
-                isExhausted || isQuotaLoading
-                  ? "bg-gray-400 text-white cursor-not-allowed opacity-80"
-                  : "bg-gradient-to-r from-accent-500 to-orange-500 text-white hover:scale-[1.03] active:scale-95"
-              }`}
+              disabled={submitting}
+              className="mt-2 lg:mt-0 lg:ml-2 flex w-full lg:w-auto h-12 items-center justify-center gap-2 rounded-xl lg:rounded-full px-6 text-sm font-bold shadow-md shadow-accent-500/25 transition-all shrink-0 bg-gradient-to-r from-accent-500 to-orange-500 text-white hover:scale-[1.03] active:scale-95 disabled:cursor-not-allowed disabled:opacity-80"
             >
               {submitting ? (
                 <>

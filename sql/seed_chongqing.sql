@@ -61,20 +61,4 @@ INSERT INTO travel_canonical_place (
 ('九街/观音桥夜市', '重庆', '江北区', '江北区北城天街', '500105', 29.578129, 106.538124, 'B0FFH7P2L9', 'market', '["年轻潮流", "夜生活", "酒吧街", "地道小吃"]'::jsonb, 90, 'manual', 'official', 'trusted', 'auto_accepted', TRUE, FALSE, 'resolved', 88)
 ON CONFLICT DO NOTHING;
 
--- 4. 补充基础事实概要表 (travel_canonical_place_summary)
-INSERT INTO travel_canonical_place_summary (
-    canonical_place_id, canonical_name, city, place_type,
-    summary_text, highlights, best_visit_time, tips, is_active
-)
-SELECT
-    p.place_id, p.canonical_name, p.city, p.place_type,
-    p.canonical_name || '是重庆极具代表性的' || p.place_type || '，交通便利，风景优美。',
-    p.category_tags,
-    '四季皆宜，夜间景观更佳',
-    '建议根据路线规划错峰出行，穿着舒适轻便的鞋子。',
-    TRUE
-FROM travel_canonical_place p
-WHERE p.city = '重庆'
-ON CONFLICT (canonical_place_id) DO NOTHING;
-
 COMMIT;

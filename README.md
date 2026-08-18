@@ -12,6 +12,14 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688.svg?style=flat-square&logo=fastapi)](https://fastapi.tiangolo.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%2B-336791.svg?style=flat-square&logo=postgresql)](https://www.postgresql.org/)
 
+<br/>
+
+<img src="docs/screenshots/home.jpg" alt="云途首页：重庆行程规划入口" width="100%" />
+
+<p>
+  <img src="docs/screenshots/plan.jpg" alt="云途行程详情：重庆三日街区漫步" width="100%" />
+</p>
+
 </div>
 
 ---
@@ -77,9 +85,8 @@
 
 当前开源版还要注意：
 
-- 默认**不用登录**就能规划（`VITE_ENABLE_AUTH=false`）
+- **不用登录**，打开页面就能规划
 - 种子数据和首页风光图目前以**重庆**为主
-- 登录 / 账号体系的后端不在本仓库；只有你自己接了 `/auth`、`/me` 才需要打开鉴权
 - 小红书采集等内部管线不完整，默认不必启用
 - `docker-compose.yml` 里的 `yuntu` / `yuntupassword` 是本地演示口令，不要原样上公网
 
@@ -127,10 +134,19 @@ DATABASE_URL=postgresql+asyncpg://yuntu:yuntupassword@localhost:5432/yuntu_trave
 # 方式 A：使用 Google Gemini
 GEMINI_API_KEY=your_gemini_api_key
 
-# 方式 B：使用 DeepSeek
-# EXTRACT_PROVIDER=deepseek
-# EXTRACT_MODEL=deepseek-chat
-# EXTRACT_API_KEY=your_deepseek_key
+# 方式 B：使用 DeepSeek（意图 / 分组 / 写作 / 审核都可共用一把 Key）
+# INTENT_PROVIDER=deepseek
+# INTENT_MODEL=deepseek-chat
+# INTENT_API_KEY=your_deepseek_key
+# GROUPING_PROVIDER=deepseek
+# GROUPING_MODEL=deepseek-chat
+# GROUPING_API_KEY=your_deepseek_key
+# WRITER_PROVIDER=deepseek
+# WRITER_MODEL=deepseek-chat
+# WRITER_API_KEY=your_deepseek_key
+# REVIEW_PROVIDER=deepseek
+# REVIEW_MODEL=deepseek-chat
+# REVIEW_API_KEY=your_deepseek_key
 
 # 地理与路线服务 (高德 Web 服务 Key)
 AMAP_API_KEY=your_amap_api_key
@@ -171,7 +187,7 @@ Yuntu/
 │   ├── init_db.py           # 一键初始化数据库与种子
 │   ├── trip.py              # 命令行单次端到端规划体验
 │   └── stress_test.py       # 规划引擎回归与压测
-├── docs/                    # 核心架构与数据库设计文档
+├── docs/                    # 架构文档与 README 截图
 ├── docker-compose.yml       # 本地编排参考（Postgres + Backend + Frontend）
 ├── Dockerfile               # 后端 Python 3.11 镜像
 ├── LICENSE                  # MIT 开源协议

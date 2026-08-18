@@ -26,7 +26,7 @@ export function ArtifactTaskNotice() {
   const handleAction = () => {
     acknowledgeTask(activeTask.recordId);
     if (!activeTask.jobId) {
-      navigate("/history");
+      navigate("/");
       return;
     }
     const encodedJobId = encodeURIComponent(activeTask.jobId);

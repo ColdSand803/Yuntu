@@ -8,61 +8,20 @@ import type {
   PlaceDetail,
   TripResult,
 } from "@/types/trip";
-import type {
-  AuthMode,
-  MeResponse,
-  SendCodeResponse,
-  ClosureSendCodeResponse,
-  HistoryResponse,
-  ProfileUpdateResponse,
-} from "@/types/auth";
 import { mapBackendStage, STAGE_MAP, TOTAL_STAGES } from "@/constants/stages";
-import { showToast } from "@/stores/toastStore";
-import { sanitizeReturnTo } from "@/utils/url";
+import { getConversationId } from "@/utils/session";
 import {
   mockSubmitTrip,
   mockPollJobStatus,
   mockFetchResult,
-  mockGetMe,
-  mockSendCode,
-  mockVerifyCode,
-  mockLogout,
-  mockSendClosureCode,
-  mockConfirmClosure,
-  mockFetchHistory,
 } from "./mock";
 
 import { ApiRequestError } from "./errors";
 export { ApiRequestError };
-export type { ProfileUpdateResponse };
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 const USE_MOCK = import.meta.env.VITE_USE_MOCK === "true";
 
-// 401 Toast 防抖
-let lastToastTime = 0;
-
-async function handleUnauthorized() {
-  const now = Date.now();
-  try {
-    const { useAuthStore, broadcastAuthEvent } = await import("@/stores/authStore");
-    const currentStatus = useAuthStore.getState().status;
-    if (currentStatus === "authenticated") {
-      useAuthStore.getState().clearAuth();
-      broadcastAuthEvent("EXPIRED");
-      if (now - lastToastTime > 3000) {
-        lastToastTime = now;
-        showToast("登录会话已过期，请重新登录", "error");
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-}
-
-/**
- * 底层 HTTP 请求：开启 Cookie Session 透传 (credentials: "include")
- */
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   let res: Response;
   try {
@@ -83,10 +42,6 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   }
 
   if (!res.ok) {
-    if (res.status === 401 && !url.startsWith("/auth/")) {
-      handleUnauthorized();
-    }
-
     const detail = (data as { detail?: unknown }).detail;
     if (detail && typeof detail === "object") {
       const d = detail as { code?: string; message?: string };
@@ -109,130 +64,6 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   }
 
   return data as T;
-}
-
-/* ---------- 认证与用户 API ---------- */
-
-export async function sendEmailCode(
-  mode: AuthMode,
-  email: string,
-  invitationCode?: string | null,
-): Promise<SendCodeResponse> {
-  if (USE_MOCK) return mockSendCode(mode, email);
-  return request<SendCodeResponse>("/auth/email/send-code", {
-    method: "POST",
-    body: JSON.stringify({
-      mode,
-      email,
-      invitation_code: mode === "register" ? invitationCode : null,
-    }),
-  });
-}
-
-export async function verifyEmailCode(
-  challengeId: string,
-  code: string,
-): Promise<{ ok: boolean }> {
-  if (USE_MOCK) return mockVerifyCode(challengeId, code);
-  return request<{ ok: boolean }>("/auth/email/verify", {
-    method: "POST",
-    body: JSON.stringify({
-      challenge_id: challengeId,
-      code,
-    }),
-  });
-}
-
-export async function getMe(): Promise<MeResponse> {
-  if (USE_MOCK) return mockGetMe();
-  return request<MeResponse>("/me");
-}
-
-export async function updateDisplayName(
-  displayName: string,
-): Promise<ProfileUpdateResponse> {
-  return request<ProfileUpdateResponse>("/me/profile", {
-    method: "PATCH",
-    body: JSON.stringify({
-      display_name: displayName,
-    }),
-  });
-}
-
-export async function logout(): Promise<{ ok: boolean }> {
-  if (USE_MOCK) return mockLogout();
-  return request<{ ok: boolean }>("/auth/logout", {
-    method: "POST",
-  });
-}
-
-export async function sendClosureCode(): Promise<ClosureSendCodeResponse> {
-  if (USE_MOCK) return mockSendClosureCode();
-  return request<ClosureSendCodeResponse>("/me/closure/send-code", {
-    method: "POST",
-  });
-}
-
-export function buildLinuxDoStartUrl(returnTo: string): string {
-  const safeReturnTo = sanitizeReturnTo(returnTo);
-  const cleanBase = API_BASE.replace(/\/+$/, "");
-  return `${cleanBase}/auth/oauth/linux-do/start?return_to=${encodeURIComponent(safeReturnTo)}`;
-}
-
-export function buildLinuxDoLinkStartUrl(returnTo: string): string {
-  const safeReturnTo = sanitizeReturnTo(returnTo, "/profile");
-  const cleanBase = API_BASE.replace(/\/+$/, "");
-  return `${cleanBase}/me/identities/linux-do/link/start?return_to=${encodeURIComponent(safeReturnTo)}`;
-}
-
-export async function sendEmailBindingCode(
-  email: string,
-): Promise<SendCodeResponse> {
-  return request<SendCodeResponse>("/me/email-binding/send-code", {
-    method: "POST",
-    body: JSON.stringify({ email }),
-  });
-}
-
-export async function confirmEmailBinding(
-  challengeId: string,
-  code: string,
-): Promise<{ ok: boolean }> {
-  return request<{ ok: boolean }>("/me/email-binding/confirm", {
-    method: "POST",
-    body: JSON.stringify({
-      challenge_id: challengeId,
-      code,
-    }),
-  });
-}
-
-export async function confirmClosure(
-  challengeId: string,
-  code: string,
-): Promise<{ ok: boolean }> {
-  if (USE_MOCK) return mockConfirmClosure(challengeId, code);
-  return request<{ ok: boolean }>("/me/closure/confirm", {
-    method: "POST",
-    body: JSON.stringify({
-      challenge_id: challengeId,
-      code,
-    }),
-  });
-}
-
-export async function getHistoryTrips(params?: {
-  cursor?: string;
-  limit?: number;
-  status?: string;
-}): Promise<HistoryResponse> {
-  if (USE_MOCK) return mockFetchHistory();
-  const query = new URLSearchParams();
-  if (params?.cursor) query.set("cursor", params.cursor);
-  if (params?.limit) query.set("limit", String(params.limit));
-  if (params?.status) query.set("status", params.status);
-  const qs = query.toString() ? `?${query.toString()}` : "";
-  return request<HistoryResponse>(`/me/trips${qs}`);
 }
 
 /* ---------- 原始响应类型 ---------- */
@@ -286,6 +117,8 @@ export async function submitTrip(
     body: JSON.stringify({
       trip_request: formData,
       request_id: requestId || `web-${crypto.randomUUID()}`,
+      source: "web",
+      conversation_id: getConversationId(),
     }),
   });
   return { ok: raw.ok, job_id: raw.job_id };
@@ -424,9 +257,6 @@ export async function fetchArtifactBlob(
     throw new ApiRequestError("NETWORK_ERROR", "网络连接失败，请检查网络", 0);
   }
   if (!res.ok) {
-    if (res.status === 401) {
-      handleUnauthorized();
-    }
     throw new ApiRequestError(
       "DOWNLOAD_FAILED",
       "下载失败，请重试",

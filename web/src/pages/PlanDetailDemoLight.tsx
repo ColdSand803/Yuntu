@@ -9,7 +9,7 @@ import { useEffect, useState, lazy, Suspense, useRef } from "react";
 import { Link } from "react-router-dom";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
-import { UserMenu } from "@/components/layout/UserMenu";
+
 import { V0812_FIXTURES } from "@/fixtures/v0812";
 import { getCityPhotoUrls } from "@/components/input/RotatingBackground";
 import { CostEstimateCard } from "@/components/detail/CostEstimateCard";
@@ -231,17 +231,8 @@ export default function PlanDetailDemoLight() {
               <i className="fa-solid fa-compass text-gray-400 text-[11px]" />
               <span>行程规划</span>
             </Link>
-            <Link
-              to="/history"
-              className="inline-flex items-center gap-1.5 text-gray-600 hover:text-gray-900 px-3 py-1.5 rounded-lg hover:bg-sand-100 transition-colors"
-            >
-              <i className="fa-solid fa-map-location-dot text-gray-400 text-[11px]" />
-              <span>我的行程</span>
-            </Link>
           </div>
         </div>
-
-        <UserMenu />
       </nav>
 
       {/* Hero */}

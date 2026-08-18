@@ -1,10 +1,25 @@
 export const CITY_ASSET_CDN_BASE_URL = "";
+export const BUNDLED_FALLBACK_IMAGE = "/bundled/chongqing.png";
+export const BUNDLED_CITY_IMAGES: Record<string, string[]> = {
+  chongqing: [BUNDLED_FALLBACK_IMAGE],
+};
 
 const configuredCityAssetBaseUrl = (
   import.meta.env.VITE_CITY_ASSET_BASE_URL ?? CITY_ASSET_CDN_BASE_URL
 )
   .trim()
   .replace(/\/+$/, "");
+
+/** OSS default: no CDN, use the in-repo Chongqing photo. */
+export function usesBundledCityAssets(
+  baseUrl = configuredCityAssetBaseUrl,
+): boolean {
+  return !baseUrl.trim();
+}
+
+export function bundledCityImages(folder: string): string[] {
+  return BUNDLED_CITY_IMAGES[folder] ?? [BUNDLED_FALLBACK_IMAGE];
+}
 
 /**
  * Prefix a city image path with the configured CDN origin.

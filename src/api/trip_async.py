@@ -75,8 +75,8 @@ class TripAsyncCreateRequest(BaseModel):
     message: str | None = None
     trip_request: TripAsyncStructuredRequest | None = None
     request_id: str = Field(max_length=512)
-    source: str = Field(max_length=30)
-    conversation_id: str = Field(max_length=200)
+    source: str = Field(default="web", max_length=30)
+    conversation_id: str = Field(default="web-guest", max_length=200)
     user_display_name: str | None = Field(default=None, max_length=100)
 
 
