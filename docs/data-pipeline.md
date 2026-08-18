@@ -2,7 +2,7 @@
 
 本文档定义 yuntu-travel 的数据采集、筛选、LLM 提纯和入库主流程。带有
 “MVP”字样的固定重庆关键词、Top 10 和全量刷新描述是历史基线；当前多城市
-批次、关键词和质量 Gate 以 `src/jobs/city_*`、`src/xhs/keywords.py`、
+批次、关键词和质量 Gate 以 `src/jobs/city_*`、
 `src/pipeline/*` 及 canonical SQL 为准。
 
 ## 1. 采集管道总览
