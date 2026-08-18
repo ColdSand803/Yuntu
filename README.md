@@ -4,6 +4,9 @@
 
 **AI 旅行规划引擎源码 · 确定性路线排程 + 事实约束文案生成**
 
+在线完整体验：**[kakarot8.com](https://kakarot8.com)**（账号、更多城市、完整规划能力）
+
+[![Live Demo](https://img.shields.io/badge/Live-kakarot8.com-0f766e.svg?style=flat-square)](https://kakarot8.com)
 [![Author: Trunks820](https://img.shields.io/badge/Author-Trunks820-orange.svg?style=flat-square&logo=github)](https://github.com/Trunks820)
 [![LINUX DO](https://img.shields.io/badge/LINUX%20DO-Community-gold.svg?style=flat-square&logo=linux)](https://linux.do)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](https://opensource.org/licenses/MIT)
@@ -77,7 +80,9 @@
 
 ## 📦 开源范围
 
-这个仓库是规划引擎和配套前端的**源码**，不是开箱即用的托管产品。自己跑之前需要准备：
+想直接用完整能力，打开 **[https://kakarot8.com](https://kakarot8.com)**。那里是线上完整版：登录、更多城市、完整规划链路。
+
+这个仓库是规划引擎和配套前端的**源码**，方便自建和二次开发，不是把线上站原样打包。自己跑之前需要准备：
 
 - Python 3.11+、Node.js 20+、PostgreSQL 16+
 - 大模型 API Key（Gemini / DeepSeek / 其他 OpenAI 兼容网关）
