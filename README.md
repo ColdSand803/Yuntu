@@ -2,9 +2,10 @@
 
 # 🧭 Yuntu (云图旅行)
 
-**生产级 AI 旅行规划引擎 · 严格抑制幻觉的确定性路线排程与文案生成服务**
+**AI 旅行规划引擎源码 · 确定性路线排程 + 事实约束文案生成**
 
 [![Author: Trunks820](https://img.shields.io/badge/Author-Trunks820-orange.svg?style=flat-square&logo=github)](https://github.com/Trunks820)
+[![LINUX DO](https://img.shields.io/badge/LINUX%20DO-Community-gold.svg?style=flat-square&logo=linux)](https://linux.do)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 [![Python: 3.11+](https://img.shields.io/badge/Python-3.11%2B-brightgreen.svg?style=flat-square&logo=python)](https://www.python.org/)
 [![React: 18](https://img.shields.io/badge/React-18-61DAFB.svg?style=flat-square&logo=react)](https://react.dev/)
@@ -66,53 +67,64 @@
 
 ---
 
-## 🚀 5 分钟快速上手
+## 📦 开源范围
 
-### 方式一：Docker Compose（推荐，一键启动全栈服务）
+这个仓库是规划引擎和配套前端的**源码**，不是开箱即用的托管产品。自己跑之前需要准备：
+
+- Python 3.11+、Node.js 20+、PostgreSQL 16+
+- 大模型 API Key（Gemini / DeepSeek / 其他 OpenAI 兼容网关）
+- 高德 Web 服务 Key（路线与地理；前端地图另需 JS Key）
+
+当前开源版还要注意：
+
+- 默认**不用登录**就能规划（`VITE_ENABLE_AUTH=false`）
+- 种子数据和首页风光图目前以**重庆**为主
+- 登录 / 账号体系的后端不在本仓库；只有你自己接了 `/auth`、`/me` 才需要打开鉴权
+- 小红书采集等内部管线不完整，默认不必启用
+- `docker-compose.yml` 里的 `yuntu` / `yuntupassword` 是本地演示口令，不要原样上公网
+
+---
+
+## 🛠️ 本地运行
+
+先复制环境变量并填入自己的 Key：
 
 ```bash
-# 1. 克隆代码
 git clone https://github.com/Trunks820/Yuntu.git
 cd Yuntu
-
-# 2. 复制环境配置文件并填入你的大模型 API Key
 cp .env.example .env
-
-# 3. 一键启动 PostgreSQL 数据库、后端 API 与 Web 前端服务
-docker compose up -d
-
-# 4. 浏览器打开 Web 前端体验 (支持表单规划与高德地图路线展示)
-# 👉 http://localhost:3000
 ```
 
-### 方式二：本地分步运行
+### 后端
 
-#### 1. 后端环境准备
 ```bash
 pip install -r requirements.txt
-cp .env.example .env
-python -m scripts.init_db                                              # 初始化表与重庆种子数据
-python -m uvicorn src.api.app:app --host 0.0.0.0 --port 6666 --reload   # 启动 API
+python -m scripts.init_db
+python -m uvicorn src.api.app:app --host 127.0.0.1 --port 6666 --reload
 ```
 
-#### 2. 前端环境准备
+### 前端
+
 ```bash
 cd web
+cp .env.example .env.development   # 按需补 VITE_AMAP_KEY
 npm install
-npm run dev                                                           # 启动前端 (http://localhost:3000)
+npm run dev                        # http://localhost:3000
 ```
+
+仓库里有 `docker-compose.yml`，可作参考，但**没有保证一键就能跑通全栈**。自己部署时注意：默认 API 只放行本机 IP，容器网络下前端反代可能会 403；公网暴露前请自己收紧端口和鉴权。
 
 ---
 
 ## ⚙️ 模型与环境配置 (`.env`)
 
-Yuntu 支持主流大模型（Google Gemini、DeepSeek、OpenAI 及任何 OpenAI 兼容的网关）：
+Yuntu 支持主流大模型（Google Gemini、DeepSeek、OpenAI 及任何 OpenAI 兼容的网关）。完整字段见 `.env.example`，最少需要：
 
 ```env
-# 数据库连接
+# 数据库连接（本地演示账号，请改成你自己的）
 DATABASE_URL=postgresql+asyncpg://yuntu:yuntupassword@localhost:5432/yuntu_travel
 
-# 方式 A：使用 Google Gemini (开箱即用)
+# 方式 A：使用 Google Gemini
 GEMINI_API_KEY=your_gemini_api_key
 
 # 方式 B：使用 DeepSeek
@@ -135,7 +147,7 @@ AMAP_ROUTE_ENABLED=true
 | `GET` | `/trip/jobs/{job_id}` | 轮询任务状态（支持排队、阶段进度透出） |
 | `GET` | `/trip/jobs/{job_id}/stream` | SSE 流式实时推送规划进度与最终结果 |
 | `GET` | `/trip/results/{result_id}` | 获取完整结构化规划详情（含 POI 经纬度、交通、游玩耗时） |
-| `POST` | `/trip` | **快速调试入口**：同步直接返回规划结果 |
+| `POST` | `/trip` | 早期同步调试入口（遗留）。会直接打模型，自己暴露到公网时注意额度 |
 
 ---
 
@@ -160,7 +172,7 @@ Yuntu/
 │   ├── trip.py              # 命令行单次端到端规划体验
 │   └── stress_test.py       # 规划引擎回归与压测
 ├── docs/                    # 核心架构与数据库设计文档
-├── docker-compose.yml       # 一键拉起 Postgres + Backend + Frontend
+├── docker-compose.yml       # 本地编排参考（Postgres + Backend + Frontend）
 ├── Dockerfile               # 后端 Python 3.11 镜像
 ├── LICENSE                  # MIT 开源协议
 └── README.md
@@ -172,10 +184,14 @@ Yuntu/
 
 由 **[Trunks820](https://github.com/Trunks820)** 设计与研发。
 
-如果你对 **LLM 落地实战、确定性 Agent 架构设计、旅行/本地生活垂类 AI** 感兴趣，或者在部署体验过程中有任何问题，欢迎：
+如果你对 **LLM 落地实战、确定性 Agent 架构设计、旅行/本地生活垂类 AI** 感兴趣，欢迎：
 - 🌟 给项目点个 **Star** 支持一下！
 - 💡 提交 [Issue](https://github.com/Trunks820/Yuntu/issues) 或 Pull Request 共同完善
 - 🤝 GitHub 关注 **[@Trunks820](https://github.com/Trunks820)** 交流探讨
+
+## 💖 鸣谢 (Acknowledgments)
+
+- 特别鸣谢 **[LINUX DO](https://linux.do)** 社区及其充满探索与极客精神的佬友们！
 
 ---
 
