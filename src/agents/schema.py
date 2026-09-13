@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from src.cost_estimate.models import CostEstimateSnapshotV1
 from src.cost_sources.models import SourceObservation
@@ -20,8 +28,20 @@ RequestedCommuteMode = Literal["driving", "transit", "cycling"]
 EffectiveCommuteMode = Literal["driving", "transit", "walking", "cycling"]
 TransitStepKind = Literal["walking", "bus", "rail", "other"]
 TransitDetailQuality = Literal["complete", "partial", "missing"]
+PoiPreferenceTag = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=40),
+]
 
 _TIME_PATTERN = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+def _optional_must_include_place_id(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("must_include.place_id must be a positive integer")
+    return value
 
 
 def parse_hhmm(value: str | None) -> int | None:
@@ -74,6 +94,11 @@ class MustIncludeItem(BaseModel):
     place_id: int | None = None
     name: str
 
+    @field_validator("place_id", mode="before")
+    @classmethod
+    def _validate_place_id(cls, value: Any) -> int | None:
+        return _optional_must_include_place_id(value)
+
     @field_validator("name")
     @classmethod
     def _strip_name(cls, value: str) -> str:
@@ -107,6 +132,31 @@ class AccommodationSuggestion(BaseModel):
     source: Literal["user_specified", "auto_recommended"]
     reason: str = ""
     user_input_unmatched: str = ""
+
+
+class AccommodationAnchor(BaseModel):
+    suggestion: AccommodationSuggestion
+    place_id: int | None = None
+    location_precision: Literal["point", "area", "unknown"] = "unknown"
+
+
+class AccommodationPlanningContext(BaseModel):
+    policy_version: Literal["accommodation-route-v1"] = "accommodation-route-v1"
+    state: Literal["fixed", "auto_candidates", "user_unresolved", "auto_unavailable"]
+    anchors: list[AccommodationAnchor] = Field(default_factory=list)
+    urban_core: tuple[float, float] | None = None
+    reason_code: str = ""
+
+
+class DayTrafficPolicy(BaseModel):
+    version: Literal["accommodation-route-v1"] = "accommodation-route-v1"
+    day_kind: Literal["urban", "excursion", "unknown"]
+    classification_basis: str
+    daily_limit_minutes: int = Field(gt=0)
+    poi_leg_limits: dict[str, int]
+    access_leg_limits: dict[str, int]
+    resolution_state: Literal["fixed", "auto_candidates", "user_unresolved", "auto_unavailable"]
+    location_precision: Literal["point", "area", "unknown"] = "unknown"
 
 
 class TrainOption(BaseModel):
@@ -201,7 +251,8 @@ class TripRequest(BaseModel):
         if not isinstance(value, list):
             return value
         cleaned = []
-        seen: set[str] = set()
+        seen_ids: set[int] = set()
+        seen_names: set[str] = set()
         for item in value:
             if isinstance(item, MustIncludeItem):
                 raw_name = item.name
@@ -214,6 +265,7 @@ class TripRequest(BaseModel):
             else:
                 cleaned.append(item)
                 continue
+            explicit_id = _optional_must_include_place_id(place_id)
             if not isinstance(raw_name, str):
                 cleaned.append(item)
                 continue
@@ -221,11 +273,19 @@ class TripRequest(BaseModel):
             if not name:
                 continue
             normalized = normalize_place_name(name)
-            if not normalized or normalized in seen:
+            if not normalized:
                 continue
-            seen.add(normalized)
+            if explicit_id is not None:
+                if explicit_id in seen_ids:
+                    continue
+                seen_ids.add(explicit_id)
+                seen_names.add(normalized)
+            elif normalized in seen_names:
+                continue
+            else:
+                seen_names.add(normalized)
             raw_item["name"] = name
-            raw_item["place_id"] = place_id
+            raw_item["place_id"] = explicit_id
             cleaned.append(raw_item)
         if len(cleaned) > 5:
             raise ValueError("must_include supports at most 5 items")
@@ -317,6 +377,226 @@ class CandidatePlace(BaseModel):
     top_reasons: list[dict] = Field(default_factory=list)
     warnings: list[dict] = Field(default_factory=list)
     must_include: bool = False
+
+
+class PoiSelectionRequest(BaseModel):
+    """Strict request facts exposed to POI_SELECTOR."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    city: str = Field(min_length=1)
+    days: StrictInt = Field(ge=1)
+    preferences: list[str] = Field(default_factory=list)
+    avoid: list[str] = Field(default_factory=list)
+
+
+class PoiSelectionConstraints(BaseModel):
+    """Deterministic membership and count constraints for POI_SELECTOR."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ordinary_target_count: StrictInt = Field(ge=0, le=30)
+    must_include_place_ids: list[StrictInt] = Field(default_factory=list, max_length=5)
+    eligible_place_ids: list[StrictInt] = Field(default_factory=list, max_length=65)
+
+    @field_validator("must_include_place_ids", "eligible_place_ids")
+    @classmethod
+    def _require_unique_positive_ids(cls, value: list[int]) -> list[int]:
+        if any(place_id <= 0 for place_id in value):
+            raise ValueError("place IDs must be positive integers")
+        if len(value) != len(set(value)):
+            raise ValueError("place IDs must be unique")
+        return value
+
+
+class PoiSelectionCandidate(BaseModel):
+    """Qualified retrieval fact exposed to POI_SELECTOR."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    place_id: StrictInt = Field(gt=0)
+    name: str = Field(min_length=1)
+    place_type: str = Field(min_length=1)
+    district: str = ""
+    must_include: bool = False
+    category_tags: list[str] = Field(default_factory=list)
+    allowed_preference_tags: list[PoiPreferenceTag] = Field(default_factory=list)
+
+    @field_validator("allowed_preference_tags")
+    @classmethod
+    def _require_unique_preference_tags(
+        cls,
+        value: list[PoiPreferenceTag],
+    ) -> list[PoiPreferenceTag]:
+        if len(value) != len(set(value)):
+            raise ValueError("allowed_preference_tags must be unique")
+        return value
+
+
+class PoiSelectionInput(BaseModel):
+    """Complete strict input contract for one disconnected selector call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1.0"] = "1.0"
+    request: PoiSelectionRequest
+    constraints: PoiSelectionConstraints
+    candidates: list[PoiSelectionCandidate] = Field(default_factory=list, max_length=65)
+
+    @model_validator(mode="after")
+    def _validate_membership_contract(self) -> "PoiSelectionInput":
+        candidate_ids = [candidate.place_id for candidate in self.candidates]
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise ValueError("candidates place_id values must be unique")
+        if candidate_ids != self.constraints.eligible_place_ids:
+            raise ValueError(
+                "eligible_place_ids must exactly match candidates place_id order"
+            )
+
+        must_ids = self.constraints.must_include_place_ids
+        must_id_set = set(must_ids)
+        ordinary_ids = [place_id for place_id in candidate_ids if place_id not in must_id_set]
+        if candidate_ids != [*ordinary_ids, *must_ids]:
+            raise ValueError(
+                "qualified must-include candidates must be appended in canonical input order"
+            )
+
+        for candidate in self.candidates:
+            expected_must = candidate.place_id in must_id_set
+            if candidate.must_include != expected_must:
+                raise ValueError("candidate must_include flag conflicts with constraints")
+            has_must_tag = "MUST_GO" in candidate.allowed_preference_tags
+            if has_must_tag != expected_must:
+                raise ValueError("MUST_GO is allowed exactly for must-include candidates")
+
+        if self.schema_version == "1.1":
+            minimum, expected_target = selector_ordinary_bounds(
+                self.request.days, len(ordinary_ids), len(must_ids), self.request.day_slot_limit)
+            if (self.constraints.ordinary_min_count, self.constraints.ordinary_max_count) != (minimum, expected_target):
+                raise ValueError("ordinary bounds do not match policy")
+        else:
+            expected_target = min(len(ordinary_ids), self.request.days * 5, 30)
+        if self.constraints.ordinary_target_count != expected_target:
+            raise ValueError("ordinary_target_count does not match the frozen formula")
+        if len(ordinary_ids) > 60:
+            raise ValueError("ordinary selector input must not exceed 60 candidates")
+        return self
+
+
+class PoiSelectionItem(BaseModel):
+    """One selected canonical ID and its evidence-bounded preference tags."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    place_id: StrictInt = Field(gt=0)
+    preference_tags: list[PoiPreferenceTag] = Field(default_factory=list)
+
+    @field_validator("preference_tags")
+    @classmethod
+    def _require_unique_tags(
+        cls,
+        value: list[PoiPreferenceTag],
+    ) -> list[PoiPreferenceTag]:
+        if len(value) != len(set(value)):
+            raise ValueError("preference_tags must be unique")
+        return value
+
+
+class PoiSelectionResult(BaseModel):
+    """Narrow selector output; order is preference only, never route order."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1.0"] = "1.0"
+    selected: list[PoiSelectionItem] = Field(default_factory=list, max_length=35)
+
+
+class VisitProfile(BaseModel):
+    """Normalized planning estimate; never written back as canonical evidence."""
+    place_id: int
+    visit_minutes: int = Field(ge=15, le=480)
+    basis: Literal["canonical", "type_estimate"]
+    source: str | None = None
+    confidence: float | None = None
+    uncertainty_minutes: int = Field(ge=0)
+    singleton_eligible: bool = False
+    policy_version: Literal["selector-route-v2"] = "selector-route-v2"
+
+
+class AccessLeg(BaseModel):
+    direction: Literal["outbound", "inbound"]
+    anchor_kind: Literal["accommodation"] = "accommodation"
+    anchor_source: Literal["user_specified", "auto_recommended"]
+    anchor_latitude: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    anchor_longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
+    place_id: int = Field(gt=0)
+    mode: EffectiveCommuteMode
+    duration_source: Literal["estimate", "amap"] = "estimate"
+    duration_minutes: int = Field(ge=0)
+    distance_meters: int = Field(ge=0)
+    estimate_policy_version: Literal["selector-route-v2"] = "selector-route-v2"
+
+
+class DayFeasibility(BaseModel):
+    ordered_place_ids: list[int]
+    policy_version: Literal["selector-route-v2"] = "selector-route-v2"
+    visit_minutes: int
+    uncertainty_minutes: int
+    poi_commute_minutes: int
+    access_minutes: int | None
+    capacity_minutes: int
+    load_limit_minutes: int
+    load_minutes: int
+    access_status: Literal["estimated", "precise", "mixed", "unknown"]
+    violations: list[str] = Field(default_factory=list)
+    singleton_eligible: bool = False
+    precise_leg_count: int = 0
+    estimated_leg_count: int = 0
+
+    @property
+    def feasible(self) -> bool:
+        return not self.violations
+
+
+def selector_ordinary_bounds(days: int, ordinary: int, must: int, slots: int) -> tuple[int, int]:
+    maximum = min(ordinary, 30, max(0, days * slots - must) + min(days, 3))
+    return min(maximum, max(0, days - must)), maximum
+
+
+class PoiSelectionRequestV11(PoiSelectionRequest):
+    notes: str = ""
+    pace: Literal["relaxed", "default", "compact"] = "default"
+    requested_commute_mode: RequestedCommuteMode = "driving"
+    effective_commute_mode: EffectiveCommuteMode = "driving"
+    commute_mode_basis: str = "feature_disabled"
+    accommodation: AccommodationSuggestion | None = None
+    time_preferences: dict[str, Any] = Field(default_factory=dict)
+    time_preferences_enabled: bool = False
+    day_slot_limit: int = Field(ge=2, le=5)
+
+
+class PoiSelectionConstraintsV11(PoiSelectionConstraints):
+    ordinary_min_count: StrictInt = Field(ge=0, le=30)
+    ordinary_max_count: StrictInt = Field(ge=0, le=30)
+
+
+class PoiSelectionCandidateV11(PoiSelectionCandidate):
+    latitude: float | None = None
+    longitude: float | None = None
+    adcode: str | None = None
+    visit_profile: VisitProfile
+    experience: list[Annotated[str, StringConstraints(max_length=80)]] = Field(default_factory=list, max_length=2)
+
+
+class PoiSelectionInputV11(PoiSelectionInput):
+    schema_version: Literal["1.1"] = "1.1"
+    request: PoiSelectionRequestV11
+    constraints: PoiSelectionConstraintsV11
+    candidates: list[PoiSelectionCandidateV11] = Field(default_factory=list, max_length=65)
+
+
+class PoiSelectionResultV11(PoiSelectionResult):
+    schema_version: Literal["1.1"] = "1.1"
 
 
 class CandidateGroup(BaseModel):
@@ -453,6 +733,41 @@ class PoiNarrativeFragment(BaseModel):
     ] = "writer"
 
 
+class PackingChecklistGroup(BaseModel):
+    """One packing category on a plan. Caps are enforced by the sanitizer."""
+
+    category: str
+    items: list[str] = Field(default_factory=list)
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def _strip_category(cls, value):
+        if not isinstance(value, str):
+            return value
+        return value.strip()
+
+    @field_validator("items", mode="before")
+    @classmethod
+    def _strip_items(cls, value):
+        if not isinstance(value, list):
+            return value
+        return [item.strip() if isinstance(item, str) else item for item in value]
+
+
+class TravelTip(BaseModel):
+    """Public travel tip. Internal Writer drafts also carry evidence_ref."""
+
+    title: str
+    content: str
+
+    @field_validator("title", "content", mode="before")
+    @classmethod
+    def _strip_text(cls, value):
+        if not isinstance(value, str):
+            return value
+        return value.strip()
+
+
 class PlanOutput(BaseModel):
     """One generated travel plan."""
     plan_name: str
@@ -468,6 +783,8 @@ class PlanOutput(BaseModel):
     budget_result: BudgetResult | None = None
     accommodation: AccommodationSuggestion | None = None
     transport: TransportSuggestion | None = None
+    packing_checklist: list[PackingChecklistGroup] | None = None
+    travel_tips: list[TravelTip] | None = None
     poi_fragments: list[PoiNarrativeFragment] = Field(
         default_factory=list,
         exclude=True,
@@ -563,15 +880,89 @@ class RouteDayGroup(BaseModel):
     commute_minutes: int = 0
     commute_notes: list[str] = Field(default_factory=list)
     time_hints: list[str] = Field(default_factory=list)
+    access_legs: list[AccessLeg] = Field(default_factory=list)
+    day_feasibility: DayFeasibility | None = None
+    traffic_policy: DayTrafficPolicy | None = None
+
+
+SelectedRouteStatus = Literal["USED", "DROPPED"]
+SelectedDropReason = Literal[
+    "HARD_INELIGIBLE",
+    "TEMPORALLY_UNSCHEDULABLE",
+    "CAPACITY_LIMIT",
+    "ROUTE_FEASIBILITY_LIMIT",
+    "NOT_CHOSEN_FOR_FINAL_ROUTE",
+]
+QualifiedSupplementReason = Literal["REPLACE_DROPPED", "FILL_EMPTY_DAY", "FILL_MUST_INCLUDE_DAY"]
+
+
+class SelectedRouteMembership(BaseModel):
+    """Closed final disposition for one selector-provided place."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    place_id: StrictInt = Field(gt=0)
+    status: SelectedRouteStatus
+    reason: SelectedDropReason | None = None
+
+    @model_validator(mode="after")
+    def _validate_status_reason(self) -> "SelectedRouteMembership":
+        if (self.status == "USED") != (self.reason is None):
+            raise ValueError("USED has no reason; DROPPED requires a closed reason")
+        return self
+
+
+class QualifiedRouteSupplement(BaseModel):
+    """Closed authorization for one qualified place added by Route."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    place_id: StrictInt = Field(gt=0)
+    reason: QualifiedSupplementReason
+
+
+class RouteMembershipLedger(BaseModel):
+    """Internal selector-to-route membership ledger; never publicly projected."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    selected_place_ids: list[StrictInt]
+    selected: list[SelectedRouteMembership]
+    supplemented: list[QualifiedRouteSupplement] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_closed_membership(self) -> "RouteMembershipLedger":
+        selected_ids = list(self.selected_place_ids)
+        disposition_ids = [item.place_id for item in self.selected]
+        supplemented_ids = [item.place_id for item in self.supplemented]
+        if any(place_id <= 0 for place_id in selected_ids):
+            raise ValueError("selected place IDs must be positive")
+        if len(selected_ids) != len(set(selected_ids)):
+            raise ValueError("selected place IDs must be unique")
+        if disposition_ids != selected_ids:
+            raise ValueError("every selected ID needs exactly one ordered disposition")
+        if len(supplemented_ids) != len(set(supplemented_ids)):
+            raise ValueError("supplemented place IDs must be unique")
+        if set(selected_ids).intersection(supplemented_ids):
+            raise ValueError("selected places cannot also be supplemented")
+        return self
 
 
 class RoutePlan(BaseModel):
-    """Deterministic route skeleton for one A/B candidate group."""
+    """Deterministic locked route skeleton."""
+    route_policy_version: Literal["selector-route-v2"] | None = None
+    accommodation_policy_version: Literal["accommodation-route-v1"] | None = None
+    accommodation_anchor: AccommodationAnchor | None = None
+    accommodation_resolution_state: str | None = None
     label: str
     day_groups: list[RouteDayGroup] = Field(default_factory=list)
     dropped_place_ids: list[int] = Field(default_factory=list)
     optimized: bool = True
     fallback_reason: str | None = None
+    membership_ledger: RouteMembershipLedger | None = Field(
+        default=None,
+        exclude=True,
+    )
 
 
 PublishedVariant = Literal["normal", "safe"]

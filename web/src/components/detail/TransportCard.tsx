@@ -1,8 +1,11 @@
 import { useState } from "react";
 import type { TripTransport, TransportMode, TransportOption } from "@/types/trip";
+import { ChevronUp, ChevronDown, TriangleAlert } from "lucide-react";
 
 interface TransportCardProps {
   data: TripTransport | null | undefined;
+  selectedMode?: "train" | "flight" | null;
+  onSelectMode?: (mode: "train" | "flight") => void;
 }
 
 function formatDuration(minutes: number): string {
@@ -70,7 +73,13 @@ function ModeOptionsList({ mode }: { mode: TransportMode }) {
   );
 }
 
-function ModeRow({ mode }: { mode: TransportMode }) {
+interface ModeRowProps {
+  mode: TransportMode;
+  isSelected?: boolean;
+  onSelect?: () => void;
+}
+
+function ModeRow({ mode, isSelected, onSelect }: ModeRowProps) {
   const [expanded, setExpanded] = useState(false);
   const isFlight = mode.mode === "flight";
   const iconEmoji = isFlight ? "✈️" : "🚄";
@@ -81,7 +90,18 @@ function ModeRow({ mode }: { mode: TransportMode }) {
     !mode.price_range.includes("参考");
 
   return (
-    <div className="rounded-xl bg-gray-50/80 p-3.5 border border-gray-100 transition-all">
+    <div
+      onClick={onSelect}
+      className={`rounded-xl p-3.5 border transition-all ${
+        onSelect ? "cursor-pointer" : ""
+      } ${
+        isSelected
+          ? "border-primary-500 bg-primary-50/40 ring-1 ring-primary-500/20 shadow-xs"
+          : onSelect
+            ? "border-gray-100 bg-gray-50/80 hover:border-primary-200 hover:bg-gray-50"
+            : "border-gray-100 bg-gray-50/80"
+      }`}
+    >
       <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
         {/* 等权摘要行：图标 + 模式 + 耗时 + 价格 + 班次 */}
         <div className="flex flex-wrap items-center gap-2.5">
@@ -89,6 +109,11 @@ function ModeRow({ mode }: { mode: TransportMode }) {
             <span aria-hidden="true">{iconEmoji}</span>
             <span>{modeTitle}</span>
           </span>
+          {isSelected && (
+            <span className="rounded-full bg-primary-100 px-2 py-0.5 text-[10px] font-bold text-primary-700">
+              已选
+            </span>
+          )}
           <span className="text-gray-300">·</span>
           <span className="text-gray-600 tabular-nums">
             最快 {formatDuration(mode.min_duration_minutes)}
@@ -116,11 +141,18 @@ function ModeRow({ mode }: { mode: TransportMode }) {
         {hasOptions && (
           <button
             type="button"
-            onClick={() => setExpanded(!expanded)}
+            onClick={(e) => {
+              e.stopPropagation();
+              setExpanded(!expanded);
+            }}
             className="inline-flex min-h-[44px] min-w-[44px] items-center gap-1 text-xs font-medium text-primary-600 hover:text-primary-800"
           >
             <span>{expanded ? "收起参考" : isFlight ? "航班参考 (Top5)" : "车次参考 (Top5)"}</span>
-            <i className={`fas ${expanded ? "fa-chevron-up" : "fa-chevron-down"} text-[10px]`} aria-hidden="true" />
+            {expanded ? (
+              <ChevronUp size={10} aria-hidden="true" />
+            ) : (
+              <ChevronDown size={10} aria-hidden="true" />
+            )}
           </button>
         )}
       </div>
@@ -128,7 +160,7 @@ function ModeRow({ mode }: { mode: TransportMode }) {
       {/* 售罄提醒 */}
       {mode.availability_status === "sold_out_at_query" && (
         <div className="mt-2.5 flex items-center gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 border border-amber-200">
-          <i className="fas fa-exclamation-triangle text-amber-500 shrink-0" aria-hidden="true" />
+          <TriangleAlert size={14} className="text-amber-500 shrink-0" aria-hidden="true" />
           <span>查询时段车票已售罄，请以购票平台实时余票为准</span>
         </div>
       )}
@@ -139,7 +171,11 @@ function ModeRow({ mode }: { mode: TransportMode }) {
   );
 }
 
-export function TransportCard({ data }: TransportCardProps) {
+export function TransportCard({
+  data,
+  selectedMode,
+  onSelectMode,
+}: TransportCardProps) {
   if (!data || !data.modes || data.modes.length === 0) {
     return null;
   }
@@ -211,7 +247,12 @@ export function TransportCard({ data }: TransportCardProps) {
         {/* 1~2 行等权的 mode 摘要 */}
         <div className="space-y-2.5">
           {data.modes.map((m: TransportMode, idx: number) => (
-            <ModeRow key={`${m.mode}-${idx}`} mode={m} />
+            <ModeRow
+              key={`${m.mode}-${idx}`}
+              mode={m}
+              isSelected={selectedMode === m.mode}
+              onSelect={onSelectMode ? () => onSelectMode(m.mode) : undefined}
+            />
           ))}
         </div>
 

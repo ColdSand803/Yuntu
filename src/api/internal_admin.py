@@ -13,6 +13,21 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import FileResponse, JSONResponse
 
+from src.agents.role_relay_store import (
+    CONTROLLED_ROLES,
+    ENDPOINT_NAME_MAX,
+    POOLED_ROLES,
+    RecoverError,
+    RecoverSuccess,
+    PostgresRoleRelayStore,
+    SafeEndpoint,
+    normalize_role,
+)
+from src.agents.writer_relay_router import WRITER_MODEL, frozen_writer_pool
+from src.agents.writer_relay_store import (
+    ALLOWED_ENDPOINTS,
+    PostgresWriterRelayStore,
+)
 from src.config import get_settings
 from src.jobs.internal_admin_store import (
     ARTIFACT_STATUSES,
@@ -51,8 +66,23 @@ _INTERNAL_RETRYABLE_CODES = frozenset(
         "INTERNAL_ADMIN_NOT_CONFIGURED",
         "GUIDE_RESULT_INCONSISTENT",
         "INTERNAL_ADMIN_INTERNAL_ERROR",
+        "INTERNAL_ADMIN_UNAVAILABLE",
+        "LLM_ENDPOINT_RECOVERY_IN_PROGRESS",
+        "LLM_ENDPOINT_BUSY",
     }
 )
+_LLM_ENDPOINT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_LLM_ENDPOINT_MESSAGES = {
+    "LLM_ENDPOINT_NOT_FOUND": "endpoint was not found",
+    "LLM_ENDPOINT_DISABLED": "endpoint is disabled",
+    "LLM_ENDPOINT_NOT_RECOVERABLE": "endpoint is not recoverable",
+    "LLM_ENDPOINT_RECOVERY_IN_PROGRESS": "endpoint recovery is in progress",
+    "LLM_ENDPOINT_BUSY": "endpoint is busy",
+    "LLM_ENDPOINT_OPERATION_CONFLICT": "operation id conflict",
+    "LLM_ENDPOINT_PROBE_FAILED": "endpoint probe failed",
+    "LLM_ENDPOINT_PROBE_TIMEOUT": "endpoint probe timed out",
+    "INTERNAL_ADMIN_UNAVAILABLE": "internal admin is unavailable",
+}
 
 _TRIP_SAFE_ERROR_MESSAGES = {
     "PUBLISH_GATE_FAILED": "攻略未通过发布校验",
@@ -78,11 +108,16 @@ class InternalAdminError(Exception):
         code: str,
         message: str,
         request_id: str,
+        *,
+        retry_after: str | None = None,
+        retryable: bool | None = None,
     ) -> None:
         self.status_code = status_code
         self.code = code
         self.message = message
         self.request_id = request_id
+        self.retry_after = retry_after
+        self.retryable = retryable
         super().__init__(code)
 
 
@@ -102,25 +137,33 @@ def _error_response(
     code: str,
     message: str,
     request_id: str,
+    retry_after: str | None = None,
+    retryable: bool | None = None,
 ) -> JSONResponse:
+    payload: dict = {
+        "ok": False,
+        "contract_version": CONTRACT_VERSION,
+        "request_id": request_id,
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": (
+                bool(retryable)
+                if retryable is not None
+                else code in _INTERNAL_RETRYABLE_CODES
+            ),
+        },
+    }
+    if retry_after:
+        payload["retry_after"] = retry_after
     return JSONResponse(
         status_code=status_code,
-        content={
-            "ok": False,
-            "contract_version": CONTRACT_VERSION,
-            "request_id": request_id,
-            "error": {
-                "code": code,
-                "message": message,
-                "retryable": code in _INTERNAL_RETRYABLE_CODES,
-            },
-        },
+        content=payload,
         headers={
             "X-Request-ID": request_id,
             "Cache-Control": "no-store",
         },
     )
-
 
 async def internal_admin_error_handler(
     _request: Request,
@@ -131,6 +174,8 @@ async def internal_admin_error_handler(
         code=exc.code,
         message=exc.message,
         request_id=exc.request_id,
+        retry_after=exc.retry_after,
+        retryable=exc.retryable,
     )
 
 
@@ -849,4 +894,359 @@ async def download_artifact_endpoint(artifact_id: str, request: Request):
             "Cache-Control": "no-store",
             "X-Request-ID": request_id,
         },
+    )
+
+
+_writer_runtime_store: PostgresWriterRelayStore | None = None
+_role_runtime_store: PostgresRoleRelayStore | None = None
+
+
+def _writer_runtime() -> PostgresWriterRelayStore:
+    global _writer_runtime_store
+    if _writer_runtime_store is None:
+        _writer_runtime_store = PostgresWriterRelayStore()
+    return _writer_runtime_store
+
+
+def _role_runtime() -> PostgresRoleRelayStore:
+    global _role_runtime_store
+    if _role_runtime_store is None:
+        _role_runtime_store = PostgresRoleRelayStore()
+    return _role_runtime_store
+
+
+def _llm_error(
+    request: Request,
+    code: str,
+    *,
+    retry_after: str | None = None,
+) -> InternalAdminError:
+    status = {
+        "LLM_ENDPOINT_NOT_FOUND": 404,
+        "LLM_ENDPOINT_PROBE_FAILED": 502,
+        "LLM_ENDPOINT_PROBE_TIMEOUT": 504,
+        "INTERNAL_ADMIN_UNAVAILABLE": 503,
+    }.get(code, 409)
+    return InternalAdminError(
+        status,
+        code,
+        _LLM_ENDPOINT_MESSAGES.get(code, "endpoint request failed"),
+        _request_id_from_request(request),
+        retry_after=retry_after,
+    )
+
+
+def _role_config_or_none(role: str):
+    from src.agents import llm
+
+    try:
+        return llm.resolve_role_config(role)
+    except ValueError:
+        return None
+
+
+def _writer_models() -> dict[str, str]:
+    config = _role_config_or_none("writer")
+    if config is None:
+        return {}
+    try:
+        endpoints, _fingerprints = frozen_writer_pool(config)
+    except ValueError:
+        return {
+            endpoint.name: str(endpoint.model or config.model)
+            for endpoint in config.relay_pool
+            if endpoint.name in ALLOWED_ENDPOINTS
+        }
+    return {
+        name: str(endpoint.model or WRITER_MODEL)
+        for name, endpoint in endpoints.items()
+    }
+
+
+def _pooled_models(role: str) -> dict[str, str]:
+    config = _role_config_or_none(role)
+    if config is None or not config.relay_pool:
+        return {}
+    return {
+        endpoint.name: str(endpoint.model or config.model)
+        for endpoint in config.relay_pool
+    }
+
+
+def _endpoint_lookup(role: str, endpoint_name: str):
+    from src.agents import llm
+
+    config = _role_config_or_none(role)
+    if config is None:
+        return None, None
+    if role == "writer":
+        try:
+            endpoints, _fingerprints = frozen_writer_pool(config)
+        except ValueError:
+            endpoints = {
+                endpoint.name: endpoint for endpoint in config.relay_pool
+            }
+        match = endpoints.get(endpoint_name) or endpoints.get(endpoint_name.lower())
+        if match is None:
+            for candidate in endpoints.values():
+                if candidate.name.lower() == endpoint_name.lower():
+                    match = candidate
+                    break
+        if match is None:
+            return None, config
+        return match, config
+    for endpoint in config.relay_pool:
+        if endpoint.name == endpoint_name or endpoint.name.lower() == endpoint_name.lower():
+            return endpoint, config
+    return None, config
+
+
+async def _list_llm_endpoints() -> list[dict]:
+    from src.agents import llm
+
+    items: list[SafeEndpoint] = []
+    writer_models = _writer_models()
+    if writer_models:
+        config = _role_config_or_none("writer")
+        if config is not None:
+            try:
+                _endpoints, fingerprints = frozen_writer_pool(config)
+                await _writer_runtime().synchronize_endpoints(fingerprints)
+            except ValueError:
+                pass
+        items.extend(await _writer_runtime().list_safe_projections(writer_models))
+    for role in POOLED_ROLES:
+        models = _pooled_models(role)
+        if not models:
+            continue
+        config = _role_config_or_none(role)
+        if config is None:
+            continue
+        fingerprints = {
+            endpoint.name: llm.pooled_endpoint_fingerprint(
+                role, config.relay_profile, endpoint, config.model
+            )
+            for endpoint in config.relay_pool
+        }
+        await _role_runtime().synchronize(role, fingerprints)
+        items.extend(await _role_runtime().list_projections(role, models))
+    return [item.to_api() for item in items]
+
+
+@router.get("/llm-endpoints")
+async def list_llm_endpoints_endpoint(request: Request):
+    if request.query_params:
+        raise _invalid(request, "this route accepts no query parameters")
+    try:
+        items = await _list_llm_endpoints()
+    except InternalAdminError:
+        raise
+    except Exception as exc:
+        logger.warning("llm_endpoint_list_failed error_type=%s", type(exc).__name__)
+        raise InternalAdminError(
+            503,
+            "INTERNAL_ADMIN_UNAVAILABLE",
+            "internal admin is unavailable",
+            _request_id_from_request(request),
+        )
+    return _success_response(request, items=items)
+
+
+@router.post("/llm-endpoints/{role}/{endpoint_name}/recover")
+async def recover_llm_endpoint_endpoint(
+    role: str,
+    endpoint_name: str,
+    request: Request,
+):
+    from src.agents import llm
+
+    if request.query_params:
+        raise _invalid(request, "this route accepts no query parameters")
+    normalized_role = normalize_role(role)
+    if normalized_role not in CONTROLLED_ROLES:
+        raise _llm_error(request, "LLM_ENDPOINT_NOT_FOUND")
+    if (
+        len(endpoint_name) > ENDPOINT_NAME_MAX
+        or not _LLM_ENDPOINT_NAME_RE.fullmatch(endpoint_name or "")
+    ):
+        raise _invalid(request, "endpoint_name is not supported")
+    try:
+        body = await request.json()
+    except Exception:
+        raise _invalid(request, "request body must be a JSON object") from None
+    if not isinstance(body, dict) or set(body.keys()) != {"operation_id"}:
+        raise _invalid(request, "request body must contain only operation_id")
+    try:
+        operation_id = uuid.UUID(str(body["operation_id"]))
+    except (TypeError, ValueError):
+        raise _invalid(request, "operation_id must be a UUID") from None
+
+    endpoint, config = _endpoint_lookup(normalized_role, endpoint_name)
+    if endpoint is None or config is None:
+        try:
+            replayed = await _role_runtime().remember_closed_rejection(
+                operation_id,
+                normalized_role,
+                endpoint_name,
+                "LLM_ENDPOINT_NOT_FOUND",
+            )
+        except RecoverError as exc:
+            raise InternalAdminError(
+                exc.http_status,
+                exc.code,
+                exc.message,
+                _request_id_from_request(request),
+                retry_after=_iso(exc.retry_after) if exc.retry_after else None,
+            ) from None
+        except Exception as exc:
+            logger.warning(
+                "llm_endpoint_reject_failed role=%s error_type=%s",
+                normalized_role,
+                type(exc).__name__,
+            )
+            raise _llm_error(request, "INTERNAL_ADMIN_UNAVAILABLE") from None
+        if replayed is not None:
+            return _success_response(request, endpoint=replayed.endpoint.to_api())
+        raise _llm_error(request, "LLM_ENDPOINT_NOT_FOUND")
+    canonical_name = endpoint.name
+    owner = f"recover:{operation_id}"
+    try:
+        if normalized_role == "writer":
+            _endpoints, fingerprints = frozen_writer_pool(config)
+            await _writer_runtime().synchronize_endpoints(fingerprints)
+            status, generation = await _writer_runtime().claim_manual_recover(
+                canonical_name,
+                operation_id=operation_id,
+                owner=owner,
+            )
+            if status == "REPLAY":
+                return await _replay_recover_response(request, operation_id)
+            if status != "CLAIMED" or generation is None:
+                return await _replay_recover_response(request, operation_id)
+            success, failure_class = await llm.execute_recovery_probe(
+                normalized_role, endpoint, config
+            )
+            result = await _writer_runtime().finish_manual_recover(
+                canonical_name,
+                operation_id=operation_id,
+                owner=owner,
+                generation=generation,
+                success=success,
+                failure_class=failure_class,
+                model=str(endpoint.model or config.model or WRITER_MODEL),
+            )
+        else:
+            fingerprints = {
+                item.name: llm.pooled_endpoint_fingerprint(
+                    normalized_role, config.relay_profile, item, config.model
+                )
+                for item in config.relay_pool
+            }
+            await _role_runtime().synchronize(normalized_role, fingerprints)
+            status, generation = await _role_runtime().claim_manual_probe(
+                normalized_role,
+                canonical_name,
+                operation_id=operation_id,
+                owner=owner,
+            )
+            if status == "REPLAY":
+                return await _replay_recover_response(request, operation_id)
+            if status != "CLAIMED" or generation is None:
+                return await _replay_recover_response(request, operation_id)
+            success, failure_class = await llm.execute_recovery_probe(
+                normalized_role, endpoint, config
+            )
+            projection = SafeEndpoint(
+                role=normalized_role,
+                endpoint_id=canonical_name,
+                display_name=canonical_name,
+                model=str(endpoint.model or config.model),
+                participation="ACTIVE",
+                qualification="QUALIFIED",
+                circuit_state="CLOSED",
+                recoverable=False,
+                cooldown_until=None,
+                inflight=None,
+                max_inflight=None,
+                updated_at=datetime.now(timezone.utc),
+            )
+            result = await _role_runtime().finish_manual_probe(
+                normalized_role,
+                canonical_name,
+                operation_id=operation_id,
+                owner=owner,
+                generation=generation,
+                success=success,
+                failure_class=failure_class,
+                endpoint=projection,
+            )
+    except RecoverError as exc:
+        raise InternalAdminError(
+            exc.http_status,
+            exc.code,
+            exc.message,
+            _request_id_from_request(request),
+            retry_after=_iso(exc.retry_after) if exc.retry_after else None,
+        ) from None
+    except InternalAdminError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "llm_endpoint_recover_failed role=%s endpoint=%s error_type=%s",
+            normalized_role,
+            canonical_name,
+            type(exc).__name__,
+        )
+        raise InternalAdminError(
+            503,
+            "INTERNAL_ADMIN_UNAVAILABLE",
+            "internal admin is unavailable",
+            _request_id_from_request(request),
+        )
+    if isinstance(result, RecoverSuccess):
+        return _success_response(request, endpoint=result.endpoint.to_api())
+    raise _llm_error(request, "INTERNAL_ADMIN_UNAVAILABLE")
+
+
+def _recover_status_code(status: str) -> tuple[str, int, str]:
+    mapping = {
+        "NOT_FOUND": ("LLM_ENDPOINT_NOT_FOUND", 404, "endpoint was not found"),
+        "DISABLED": ("LLM_ENDPOINT_DISABLED", 409, "endpoint is disabled"),
+        "NOT_RECOVERABLE": (
+            "LLM_ENDPOINT_NOT_RECOVERABLE",
+            409,
+            "endpoint is not recoverable",
+        ),
+        "BUSY_PROBE": (
+            "LLM_ENDPOINT_RECOVERY_IN_PROGRESS",
+            409,
+            "endpoint recovery is in progress",
+        ),
+        "BUSY": ("LLM_ENDPOINT_BUSY", 409, "endpoint is busy"),
+        "UNAVAILABLE": (
+            "INTERNAL_ADMIN_UNAVAILABLE",
+            503,
+            "internal admin is unavailable",
+        ),
+    }
+    return mapping.get(
+        status,
+        ("LLM_ENDPOINT_NOT_RECOVERABLE", 409, "endpoint is not recoverable"),
+    )
+
+
+async def _replay_recover_response(request: Request, operation_id: uuid.UUID):
+    payload = await _role_runtime().load_operation_replay(operation_id)
+    if payload is None:
+        raise _llm_error(request, "LLM_ENDPOINT_RECOVERY_IN_PROGRESS")
+    if payload.get("ok"):
+        return _success_response(request, endpoint=payload["endpoint"])
+    raise InternalAdminError(
+        int(payload.get("http_status") or 409),
+        str(payload.get("error_code") or "LLM_ENDPOINT_NOT_RECOVERABLE"),
+        str(payload.get("message") or "endpoint is not recoverable"),
+        _request_id_from_request(request),
+        retry_after=payload.get("retry_after")
+        if isinstance(payload.get("retry_after"), str)
+        else None,
     )

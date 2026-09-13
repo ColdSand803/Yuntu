@@ -1,4 +1,5 @@
 import type { TripMustInclude } from "@/types/trip";
+import { CircleAlert } from "lucide-react";
 
 interface MustIncludeNoticeProps {
   items?: TripMustInclude[] | null;
@@ -25,7 +26,7 @@ export function MustIncludeNotice({ items }: MustIncludeNoticeProps) {
     >
       <div className="rounded-2xl border border-amber-200/80 bg-amber-50/90 p-4 text-xs text-amber-900 shadow-xs space-y-2">
         <div className="flex items-center gap-2 font-bold text-amber-800">
-          <i className="fa-solid fa-circle-exclamation text-amber-600 text-sm" aria-hidden="true" />
+          <CircleAlert size={14} className="text-amber-600" aria-hidden="true" />
           <span>必去地点调整提醒（{unscheduledItems.length} 项未排入行程）</span>
         </div>
         <ul className="space-y-1.5 pl-5 list-disc text-[11px] leading-relaxed">

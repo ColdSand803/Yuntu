@@ -172,8 +172,20 @@ def _find_insertion_offset(
 def completion_sentence_for_contract(
     contract: DeterministicActionContract,
 ) -> str:
-    """Render one F1-authorized action for both F2 completion and local FR."""
-    action = str(contract.authorized_actions[0] or "").strip().rstrip("。")
+    """Render one F1-authorized action for both F2 completion and local FR.
+
+    Skips [INTERNAL-prefixed items and falls back to a generic action when
+    no publishable action is available.
+    """
+    from src.agents.evidence_strength import first_publishable_action
+
+    publishable = first_publishable_action(contract.authorized_actions)
+    if publishable is None:
+        # No publishable action available: use the Safe fallback
+        action = "选择感兴趣的部分游览，按体力决定参观范围"
+    else:
+        action = publishable.strip().rstrip("。")
+
     if contract.blueprint_role in _MEAL_ROLES:
         return f"到{contract.place_name}后，安排{action}。"
     return f"到{contract.place_name}后，{action}。"

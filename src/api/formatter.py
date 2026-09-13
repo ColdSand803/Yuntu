@@ -31,8 +31,9 @@ def _commute_reference_lines(result: WorkflowResult, plan_index: int) -> list[st
         return []
     return ["通勤参考：", *lines]
 
+
 def format_plans_markdown(result: WorkflowResult) -> str:
-    """Format WorkflowResult into readable Markdown text."""
+    """Format WorkflowResult into Markdown text for Hermes to forward."""
     req = result.trip_request
     lines: list[str] = []
 

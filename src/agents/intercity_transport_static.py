@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.cost_reference.catalog import load_reference_catalog
+
 
 STATIC_TRANSPORT_VERSION = "2026-08-01"
 
@@ -94,7 +96,34 @@ STATIC_TRANSPORT: dict[tuple[str, str], dict[str, Any]] = {
 }
 
 
-def get_static_fallback(from_city: str, to_city: str) -> dict[str, Any] | None:
-    """Return only the explicitly reviewed direction."""
+def get_catalog_fallback(from_city: str, to_city: str) -> dict | None:
+    """Try to get intercity price from catalog before falling back to static dict."""
+    try:
+        catalog = load_reference_catalog()
+        entries = [
+            e for e in catalog.intercity
+            if e.from_city == from_city and e.to_city == to_city
+        ]
+        if not entries:
+            return None
+        result = {}
+        for entry in entries:
+            min_yuan = entry.range_fen.min_fen / 100
+            max_yuan = entry.range_fen.max_fen / 100
+            price_str = f"¥{int(min_yuan)}-{int(max_yuan)}"
+            if entry.mode == "train":
+                result["train_price"] = price_str
+            elif entry.mode == "flight":
+                result["flight_price"] = price_str
+        return result if result else None
+    except Exception:
+        return None
 
+
+def get_static_fallback(from_city: str, to_city: str) -> dict[str, Any] | None:
+    # Try catalog first (expanded 16-city coverage)
+    catalog_result = get_catalog_fallback(from_city, to_city)
+    if catalog_result is not None:
+        return catalog_result
+    # Fall back to hardcoded dict (legacy 15 pairs)
     return STATIC_TRANSPORT.get((from_city, to_city))

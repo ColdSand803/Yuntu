@@ -21,6 +21,7 @@ from src.export.city_background import (
     CityBackgroundClient,
     build_city_background_client,
 )
+from src.export.city_photo import CityPhotoResolver, build_city_photo_resolver
 from src.export.pdf_renderer import PdfRenderError, render_pdf_artifact
 from src.export.share_image_renderer import (
     ShareImageRenderError,
@@ -55,8 +56,9 @@ class _RenderTarget:
 
 RenderPdf = Callable[[ExportSource, Path], Any]
 RenderShareImage = Callable[[ExportSource, Path], Any]
-SourceBuilder = Callable[[int], Awaitable[ExportSource | None]]
+SourceBuilder = Callable[[int, str], Awaitable[ExportSource | None]]
 _AUTO_BACKGROUND_CLIENT = object()
+_AUTO_CITY_PHOTO_RESOLVER = object()
 
 
 class ExportWorker:
@@ -69,6 +71,7 @@ class ExportWorker:
         share_image_renderer: RenderShareImage | None = None,
         source_builder: SourceBuilder | None = None,
         city_background_client: CityBackgroundClient | None | object = _AUTO_BACKGROUND_CLIENT,
+        city_photo_resolver: CityPhotoResolver | None | object = _AUTO_CITY_PHOTO_RESOLVER,
     ) -> None:
         self._stop = asyncio.Event()
         self._tasks: dict[str, set[asyncio.Task[None]]] = {
@@ -79,6 +82,10 @@ class ExportWorker:
             self._city_background_client = build_city_background_client(get_settings())
         else:
             self._city_background_client = city_background_client
+        if city_photo_resolver is _AUTO_CITY_PHOTO_RESOLVER:
+            self._city_photo_resolver = build_city_photo_resolver(get_settings())
+        else:
+            self._city_photo_resolver = city_photo_resolver
         self._pdf_renderer = pdf_renderer or self._default_pdf_renderer
         self._share_image_renderer = (
             share_image_renderer or self._default_share_image_renderer
@@ -212,7 +219,7 @@ class ExportWorker:
         )
         target: _RenderTarget | None = None
         try:
-            source = await self._source_builder(record.result_record_id)
+            source = await self._source_builder(record.result_record_id, record.artifact_type)
             if source is None:
                 await mark_artifact_failed(
                     record.artifact_id,
@@ -351,7 +358,7 @@ class ExportWorker:
         return render_pdf_artifact(
             source,
             output_path,
-            ai_background_client=None,
+            city_photo_resolver=self._city_photo_resolver,
             storage_key=None,
         )
 

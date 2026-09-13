@@ -6,10 +6,11 @@ from pydantic_settings import BaseSettings
 
 _FROZEN_WRITER_STREAM_ATTEMPT_CAP_SECONDS = 60.0
 _FROZEN_WORKFLOW_WALL_SECONDS = 180.0
+_MAX_LLM_RECOVERY_PROBE_TIMEOUT_SECONDS = 45.0
 
 
 class Settings(BaseSettings):
-    app_version: str = "0.9.6"
+    app_version: str = "0.9.9.10"
     database_url: str = "postgresql+asyncpg://user:pass@localhost:5432/yuntu_travel"
     gemini_api_key: str = ""
     tikhub_api_token: str = ""
@@ -40,6 +41,8 @@ class Settings(BaseSettings):
     export_pdf_concurrency: int = 4
     export_share_image_concurrency: int = 2
     export_pdf_timeout_seconds: int = 420
+    export_pdf_city_photo_enabled: bool = True
+    export_pdf_city_photo_timeout_seconds: float = 5.0
     export_share_image_timeout_seconds: int = 420
     export_pdf_daily_ip_limit: int = 5
     export_share_image_daily_ip_limit: int = 100
@@ -84,6 +87,10 @@ class Settings(BaseSettings):
     transport_station_map_ttl_hours: int = 24
     transport_resolver_total_budget_seconds: float = 12.0
     llm_verify_ssl: bool = True
+    # A recovery probe must finish comfortably before the 60-second manual
+    # probe lease expires.  It validates transport and a parseable non-empty
+    # model response; role output quality remains guarded by the normal path.
+    llm_recovery_probe_timeout_seconds: float = 30.0
 
     # Route Planning / v0.6 data pipeline.
     route_daily_commute_budget_normal: int = 90
@@ -113,17 +120,22 @@ class Settings(BaseSettings):
     amap_poi_qps: float = 2.0
     amap_route_enabled: bool = True
     amap_route_timeout: float = 5.0
-    amap_route_qps: float = 0.5
+    amap_route_qps: float = 2.5
     amap_route_backoff_seconds: float = 60.0
     amap_route_cache_ttl_hours: int = 72
     amap_route_enrichment_concurrency: int = 2
     amap_route_enrichment_timeout_seconds: float = 120.0
-    amap_route_call_budget: int = 24
-    amap_route_time_budget_ms: int = 45000
+    amap_route_call_budget: int = 40
+    amap_route_time_budget_ms: int = 60000
     amap_district_sync_interval_days: int = 90
     weather_enrichment_enabled: bool = False
     amap_weather_api_key: str = ""
     amap_weather_timeout: float = 5.0
+    # v0.9.9.6 optional plan-level packing/tips. Flag off keeps Result Schema 2.1
+    # and omits the new fields; enable only after BFF 2.2 compatibility.
+    result_schema_22_enabled: bool = False
+    amap_poi_detail_enabled: bool = False
+    amap_poi_detail_timeout: float = 5.0
 
     redis_url: str = ""
 
@@ -182,7 +194,7 @@ class Settings(BaseSettings):
     writer_model: str = "claude-opus-4-6"
     writer_api_key: str = ""
     writer_stream_probe_enabled: bool = False
-    writer_stream_first_token_deadline_seconds: float = 15.0
+    writer_stream_first_token_deadline_seconds: float = 20.0
     writer_stream_stall_deadline_seconds: float = 10.0
     writer_plan_concurrency_enabled: bool = True
     writer_plan_concurrency_fallback_enabled: bool = True
@@ -225,11 +237,26 @@ class Settings(BaseSettings):
     safe_plan_writer_fallback_enabled: bool = False
     safe_plan_review_fallback_enabled: bool = False
 
+    # Qwen Review for cross-review routing (DS Writer → Qwen Review)
+    qwen_review_base_url: str = ""
+    qwen_review_api_key: str = ""
+    qwen_review_model: str = "Qwen3.8-27B"
+
     grouping_provider: str = "relay"
     grouping_relay_profile: str = "gpt_grouping"
     grouping_model: str = "gpt-5.5"
     grouping_api_key: str = ""
     grouping_temperature: float = 0.3
+    grouping_wall_timeout_seconds: float = 8.0
+
+    # POI_SELECTOR is integrated into the single-plan production workflow and remains bounded by the existing trip deadline.
+    selector_route_v2_enabled: bool = False
+    accommodation_route_coupling_enabled: bool = False
+    selector_provider: str = "relay"
+    selector_relay_profile: str = "gpt_grouping"
+    selector_model: str = "gpt-5.5"
+    selector_api_key: str = ""
+    selector_temperature: float = 0.3
 
     @model_validator(mode="after")
     def _validate_commute_mode_settings(self) -> "Settings":
@@ -244,6 +271,15 @@ class Settings(BaseSettings):
         for field_name in probe_deadline_fields:
             if float(getattr(self, field_name)) <= 0:
                 raise ValueError(f"{field_name} must be positive")
+        if self.llm_recovery_probe_timeout_seconds <= 0:
+            raise ValueError("LLM_RECOVERY_PROBE_TIMEOUT_SECONDS must be positive")
+        if (
+            self.llm_recovery_probe_timeout_seconds
+            > _MAX_LLM_RECOVERY_PROBE_TIMEOUT_SECONDS
+        ):
+            raise ValueError(
+                "LLM_RECOVERY_PROBE_TIMEOUT_SECONDS must not exceed 45 seconds"
+            )
         if (
             self.writer_stream_first_token_deadline_seconds
             >= _FROZEN_WRITER_STREAM_ATTEMPT_CAP_SECONDS
@@ -298,6 +334,9 @@ class Settings(BaseSettings):
             if float(getattr(self, field_name)) <= 0:
                 raise ValueError(f"{field_name} must be positive")
         positive_fields = (
+            "grouping_wall_timeout_seconds",
+            "export_pdf_city_photo_timeout_seconds",
+            "amap_poi_detail_timeout",
             "route_estimate_road_factor",
             "commute_daily_budget_factor_driving",
             "commute_daily_budget_factor_transit",
@@ -311,6 +350,10 @@ class Settings(BaseSettings):
         for field_name in positive_fields:
             if float(getattr(self, field_name)) <= 0:
                 raise ValueError(f"{field_name} must be positive")
+        if self.export_pdf_city_photo_timeout_seconds > 5.0:
+            raise ValueError(
+                "EXPORT_PDF_CITY_PHOTO_TIMEOUT_SECONDS must not exceed 5 seconds"
+            )
 
         non_negative_fields = (
             "route_single_leg_max",

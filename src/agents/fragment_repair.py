@@ -395,11 +395,18 @@ def qualify_review_fragment_issues(
     """
     qualified: list[GenerationIssue] = []
     for issue in issues:
-        if not (
+        repairable_unsupported_fact = (
             issue.reason == "unsupported_fact_expansion"
-            and issue.category in {"BLOCKER", "REPAIR"}
+            and (
+                issue.category in {"BLOCKER", "REPAIR"}
+                or (
+                    issue.category == "WARN"
+                    and issue.publish_action == "RECORD_ONLY"
+                )
+            )
             and issue.plan_index is not None
-        ):
+        )
+        if not repairable_unsupported_fact:
             qualified.append(issue)
             continue
         zero = issue.plan_index - 1
@@ -540,9 +547,21 @@ def deterministic_unsupported_fact_fragment_repair(
         issue for issue in issues
         if issue.plan_index == plan_index
         and issue.reason == "unsupported_fact_expansion"
-        and issue.category in {"BLOCKER", "REPAIR"}
+        and (
+            issue.category in {"BLOCKER", "REPAIR"}
+            or (
+                issue.category == "WARN"
+                and issue.publish_action == "RECORD_ONLY"
+            )
+        )
         and (issue.metadata or {}).get("review_anchored") is True
-    ][:MAX_TARGETS]
+    ]
+    # Keyed POI fragments have exact immutable ownership and use a local
+    # evidence-contract replacement, so every Review-confirmed key can be
+    # closed in one bounded O(n) pass.  The legacy free-text path retains its
+    # stricter target cap because it rewrites positional spans.
+    if not plan.poi_fragments:
+        candidates = candidates[:MAX_TARGETS]
     if not candidates:
         return FragmentRepairResult(plans=[plan], notes=["no review fragment targets"])
 

@@ -1,24 +1,26 @@
 import type { CommuteLeg as CommuteLegType, TransitStep } from "@/types/trip";
 import { commuteModeName, formatMinutes, formatDistance, commuteModeIcon } from "@/utils/format";
+import type { LucideIcon } from "lucide-react";
+import { Footprints, Bus, TrainFront, Route } from "lucide-react";
 
 interface CommuteLegProps {
   leg: CommuteLegType;
 }
 
-const STEP_KIND_ICON: Record<string, string> = {
-  walking: "fa-person-walking",
-  bus: "fa-bus",
-  rail: "fa-train-subway",
-  other: "fa-route",
+const STEP_KIND_ICON: Record<string, LucideIcon> = {
+  walking: Footprints,
+  bus: Bus,
+  rail: TrainFront,
+  other: Route,
 };
 
 function TransitStepItem({ step }: { step: TransitStep }) {
-  const icon = STEP_KIND_ICON[step.kind] ?? "fa-route";
+  const StepIcon = STEP_KIND_ICON[step.kind] ?? Route;
   const isTransit = step.kind === "bus" || step.kind === "rail";
   return (
     <div className="flex items-start gap-2">
       <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary-50">
-        <i className={`fa-solid ${icon} text-[9px] text-primary-500`} aria-hidden="true" />
+        <StepIcon size={9} className="text-primary-500" aria-hidden="true" />
       </div>
       <div className="min-w-0 text-[11px] leading-snug text-gray-600">
         {isTransit && step.line_name ? (
@@ -51,7 +53,7 @@ function TransitStepItem({ step }: { step: TransitStep }) {
 }
 
 export function CommuteLeg({ leg }: CommuteLegProps) {
-  const icon = commuteModeIcon(leg.mode);
+  const ModeIcon = commuteModeIcon(leg.mode);
   const hasSteps = leg.mode === "transit" && leg.transit_steps && leg.transit_steps.length > 0;
   const summary = leg.transit_summary;
 
@@ -59,7 +61,7 @@ export function CommuteLeg({ leg }: CommuteLegProps) {
     <div className="ml-[22px] border-l border-dashed border-primary-200 py-1.5 pl-5">
       {/* 顶行：出行方式 + 时间 + 距离 */}
       <span className="inline-flex items-center gap-1 rounded-full bg-sand-50 px-2 py-0.5 text-[11px] text-sand-500">
-        <i className={`fa-solid ${icon} text-[9px]`} aria-hidden="true" />
+        <ModeIcon size={9} aria-hidden="true" />
         {commuteModeName(leg.mode)}{" "}
         {formatMinutes(leg.duration_minutes)} · {formatDistance(leg.distance_meters)}
       </span>

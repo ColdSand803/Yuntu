@@ -7,6 +7,8 @@ or network dependency.
 
 from __future__ import annotations
 
+from src.agents.route_feasibility import access_summary
+
 import hashlib
 import json
 import time
@@ -53,6 +55,7 @@ class LockedSafeDay:
     day: int
     places: tuple[LockedSafeActionContract, ...]
     commute_templates: tuple[LockedSafeCommuteTemplate, ...] = ()
+    accommodation_access_summary: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,6 +255,7 @@ def lock_safe_input(
                 day=day_group.day,
                 places=tuple(locked_places),
                 commute_templates=tuple(locked_commute_templates),
+                accommodation_access_summary=access_summary(day_group) if route_plan.route_policy_version == "selector-route-v2" else "",
             ))
         locked_plans.append(LockedSafePlan(
             plan_index=plan_index,
@@ -315,6 +319,7 @@ def _normalized_contract(locked_input: LockedSafeInput) -> list[dict[str, Any]]:
             "days": [
                 {
                     "day": day.day,
+                    **({"accommodation_access_summary": day.accommodation_access_summary} if day.accommodation_access_summary else {}),
                     "places": [
                         {
                             "place_id": place.place_id,
@@ -382,6 +387,8 @@ def render_safe_plans(
         for day_data in plan_data["days"]:
             day = int(day_data["day"])
             text_parts.append(f"Day {day}\n")
+            if day_data.get("accommodation_access_summary"):
+                text_parts.append(str(day_data["accommodation_access_summary"]) + "。\n")
             day_names: list[str] = []
             commute_templates = {
                 (
@@ -417,7 +424,7 @@ def render_safe_plans(
                     if usable_actions:
                         action = usable_actions[0]
                     else:
-                        action = "按自己的节奏在这里看看走走"
+                        action = "选择感兴趣的部分游览，按体力决定参观范围"
                     sentence = f"到{place_name}后，{action}。"
                 start = sum(len(part) for part in text_parts)
                 text_parts.append(sentence)
@@ -455,6 +462,8 @@ def render_safe_plans(
             used_place_ids=used_place_ids,
             used_place_names=used_place_names,
             day_place_names=day_place_names,
+            packing_checklist=None,
+            travel_tips=None,
             poi_fragments=fragments,
         ))
 

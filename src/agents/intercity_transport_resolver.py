@@ -160,6 +160,10 @@ class ProviderResponseError(RuntimeError):
     """A non-retryable provider HTTP response failure."""
 
 
+class _NoHighSpeedTrains:
+    """12306 returned rows, but parse_train_list kept no G/D trains."""
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -625,7 +629,7 @@ async def _query_12306_once(
     *,
     deadline: float,
     timeout: float,
-) -> dict[str, Any] | None:
+) -> dict[str, Any] | _NoHighSpeedTrains | None:
     async with httpx.AsyncClient(verify=True, follow_redirects=True) as client:
         await _warm_12306_session(client, deadline=deadline, timeout=timeout)
         station_map = await _load_station_map(client, deadline=deadline, timeout=timeout)
@@ -652,8 +656,18 @@ async def _query_12306_once(
             return None
         if isinstance(payload, dict) and payload.get("httpstatus") not in {None, 200}:
             return None
-        trains = parse_train_list(payload if isinstance(payload, dict) else {})
+        payload_dict = payload if isinstance(payload, dict) else {}
+        trains = parse_train_list(payload_dict)
         if not trains:
+            data = payload_dict.get("data")
+            rows = data.get("result") if isinstance(data, dict) else None
+            if isinstance(rows, list) and rows:
+                logger.info(
+                    "12306 transport lookup has no G/D trains route=%s->%s",
+                    from_city,
+                    to_city,
+                )
+                return _NoHighSpeedTrains()
             return None
         top, availability = recommend_trains(trains)
         if not top:
@@ -715,7 +729,7 @@ async def _query_12306_with_deadline(
     query_date: str,
     *,
     deadline: float,
-) -> dict[str, Any] | None:
+) -> dict[str, Any] | _NoHighSpeedTrains | None:
     settings = get_settings()
     attempts = max(0, int(settings.transport_12306_retry_count)) + 1
     for attempt in range(attempts):
@@ -1250,6 +1264,7 @@ async def resolve_transport(trip_request: TripRequest) -> TransportSuggestion | 
     train: dict[str, Any] | None = None
     flight: dict[str, Any] | None = None
     flight_task: asyncio.Task | None = None
+    no_high_speed_trains = False
     preflight_need = static_entry is None or _need_flight(None, static_entry)
     if window in {"both", "flight_only"} and preflight_need:
         flight_task = asyncio.create_task(_query_flights_with_deadline(
@@ -1260,7 +1275,7 @@ async def resolve_transport(trip_request: TripRequest) -> TransportSuggestion | 
         ))
 
     if window in {"train_only", "both"}:
-        train = await _await_until_deadline(
+        train_query = await _await_until_deadline(
             asyncio.create_task(_query_12306_with_deadline(
                 from_city,
                 to_city,
@@ -1269,9 +1284,14 @@ async def resolve_transport(trip_request: TripRequest) -> TransportSuggestion | 
             )),
             deadline,
         )
+        if isinstance(train_query, _NoHighSpeedTrains):
+            no_high_speed_trains = True
+            train = None
+        else:
+            train = train_query
 
-    need_flight = _need_flight(train, static_entry)
-    if need_flight and window in {"both", "flight_only"}:
+    need_flight = no_high_speed_trains or _need_flight(train, static_entry)
+    if need_flight and (window in {"both", "flight_only"} or no_high_speed_trains):
         if flight_task is None:
             flight_task = asyncio.create_task(_query_flights_with_deadline(
                 from_city,

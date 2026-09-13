@@ -295,36 +295,46 @@ async def _match_one_must_include(
 
     if place_id is not None:
         row = await _fetch_place_by_id(session, place_id)
-        if row is not None:
-            row_city = str(getattr(row, "city", "") or "").strip()
-            if row_city and row_city != city:
-                return _report_from_row(
-                    input_name=input_name,
-                    normalized_name=normalized_name,
-                    row=row,
-                    status="cross_city",
-                    matched_via="place_id",
-                    avoid_conflict=True,
-                    reason=f"place_id belongs to {row_city}, not {city}",
-                )
-            if row_city == city and _is_displayable_trusted(row):
-                return _report_from_row(
-                    input_name=input_name,
-                    normalized_name=normalized_name,
-                    row=row,
-                    status="matched",
-                    matched_via="place_id",
-                    reason="client place_id verified in requested city",
-                )
-            if row_city == city and _is_candidate(row):
-                return _report_from_row(
-                    input_name=input_name,
-                    normalized_name=normalized_name,
-                    row=row,
-                    status="candidate",
-                    matched_via="place_id",
-                    reason="client place_id points to candidate place in requested city",
-                )
+        if row is None:
+            return _report_unmatched(
+                input_name=input_name,
+                normalized_name=normalized_name,
+                reason="client place_id was not found",
+            )
+        row_city = str(getattr(row, "city", "") or "").strip()
+        if row_city and row_city != city:
+            return _report_from_row(
+                input_name=input_name,
+                normalized_name=normalized_name,
+                row=row,
+                status="cross_city",
+                matched_via="place_id",
+                avoid_conflict=True,
+                reason=f"place_id belongs to {row_city}, not {city}",
+            )
+        if row_city == city and _is_displayable_trusted(row):
+            return _report_from_row(
+                input_name=input_name,
+                normalized_name=normalized_name,
+                row=row,
+                status="matched",
+                matched_via="place_id",
+                reason="client place_id verified in requested city",
+            )
+        if row_city == city and _is_candidate(row):
+            return _report_from_row(
+                input_name=input_name,
+                normalized_name=normalized_name,
+                row=row,
+                status="candidate",
+                matched_via="place_id",
+                reason="client place_id points to candidate place in requested city",
+            )
+        return _report_unmatched(
+            input_name=input_name,
+            normalized_name=normalized_name,
+            reason="client place_id is not a usable match in requested city",
+        )
 
     same_city_exact = await _fetch_same_city_exact(
         session,

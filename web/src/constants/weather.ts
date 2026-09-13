@@ -27,17 +27,20 @@ export function weatherIcon(code: string | null | undefined): string {
   return WEATHER_ICON_EMOJI[code] ?? WEATHER_ICON_EMOJI.unknown;
 }
 
-/** 取 FA 单色线性图标，含 fog/haze/wind 及 snowflake 正确映射 */
-export function weatherFaIcon(iconCode: string | null | undefined): string {
-  if (!iconCode) return "fa-sun";
+import type { LucideIcon } from "lucide-react";
+import { Sun, CloudRain, Cloud, Snowflake, Zap, CloudFog, Wind } from "lucide-react";
+
+/** 取单色线性天气图标组件，含 fog/haze/wind 及 snowflake 正确映射 */
+export function weatherFaIcon(iconCode: string | null | undefined): LucideIcon {
+  if (!iconCode) return Sun;
   const code = iconCode.toLowerCase();
-  if (code.includes("rain") || code.includes("drizzle")) return "fa-cloud-rain";
-  if (code.includes("cloud") || code.includes("overcast")) return "fa-cloud";
-  if (code.includes("snow") || code.includes("sleet")) return "fa-snowflake";
-  if (code.includes("thunder") || code.includes("storm")) return "fa-bolt";
-  if (code.includes("fog") || code.includes("haze") || code.includes("smog")) return "fa-smog";
-  if (code.includes("wind")) return "fa-wind";
-  return "fa-sun";
+  if (code.includes("rain") || code.includes("drizzle")) return CloudRain;
+  if (code.includes("cloud") || code.includes("overcast")) return Cloud;
+  if (code.includes("snow") || code.includes("sleet")) return Snowflake;
+  if (code.includes("thunder") || code.includes("storm")) return Zap;
+  if (code.includes("fog") || code.includes("haze") || code.includes("smog")) return CloudFog;
+  if (code.includes("wind")) return Wind;
+  return Sun;
 }
 
 import type { WeatherDay } from "@/types/trip";

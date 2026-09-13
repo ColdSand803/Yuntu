@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { useTripTaskStore, StoredTripTask } from "@/stores/tripTaskStore";
+import { MapPinned, CircleAlert, X, ArrowRight } from "lucide-react";
 
 export function TripTaskNotice() {
   const navigate = useNavigate();
@@ -63,10 +64,11 @@ export function TripTaskNotice() {
                   : "bg-red-50 text-red-600 ring-1 ring-red-200/50"
               }`}
             >
-              <i
-                className={`fa-solid ${isReady ? "fa-map-location-dot" : "fa-circle-exclamation"} text-lg`}
-                aria-hidden="true"
-              />
+              {isReady ? (
+                <MapPinned size={18} aria-hidden="true" />
+              ) : (
+                <CircleAlert size={18} aria-hidden="true" />
+              )}
             </div>
 
             <div className="min-w-0">
@@ -87,7 +89,7 @@ export function TripTaskNotice() {
             aria-label="关闭"
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gray-50 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
           >
-            <i className="fa-solid fa-xmark text-sm" aria-hidden="true" />
+            <X size={14} aria-hidden="true" />
           </button>
         </div>
 
@@ -113,7 +115,7 @@ export function TripTaskNotice() {
             {isReady ? (
               <>
                 <span>查看攻略</span>
-                <i className="fa-solid fa-arrow-right text-[10px]" aria-hidden="true" />
+                <ArrowRight size={10} aria-hidden="true" />
               </>
             ) : (
               <span>重新规划</span>

@@ -1,4 +1,5 @@
 import type { AccommodationInfo } from "@/types/trip";
+import { Hotel, ChevronRight } from "lucide-react";
 
 interface AccommodationTimelineNodeProps {
   accommodation?: AccommodationInfo | null;
@@ -91,11 +92,11 @@ export function AccommodationTimelineNode({
 
             <div className="flex items-center gap-2">
               <span className="flex items-center gap-1 rounded-lg bg-white border border-gray-100 px-2.5 py-1 text-xs font-semibold text-primary-700 shadow-2xs">
-                <i className="fa-solid fa-hotel text-primary-500" />
+                <Hotel size={14} className="text-primary-500" />
                 {isUserSpecified ? "入住大本营" : "住宿推荐地"}
               </span>
               <span className="ml-1 text-xs font-medium text-primary-600 opacity-0 group-hover:opacity-100 transition-opacity hidden sm:inline-flex items-center gap-0.5">
-                地图定位 <i className="fa-solid fa-chevron-right text-[10px]" />
+                地图定位 <ChevronRight size={10} />
               </span>
             </div>
           </div>
@@ -158,7 +159,7 @@ export function AccommodationTimelineNode({
         </div>
 
         <span className="ml-2 text-xs text-primary-600 opacity-0 group-hover:opacity-100 transition-opacity hidden sm:inline-flex items-center gap-0.5">
-          地图定位 <i className="fa-solid fa-chevron-right text-[10px]" />
+          地图定位 <ChevronRight size={10} />
         </span>
       </div>
     </div>

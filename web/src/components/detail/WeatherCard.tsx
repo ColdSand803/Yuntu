@@ -1,5 +1,6 @@
 import type { TripWeather, WeatherDay } from "@/types/trip";
 import { weatherIcon } from "@/constants/weather";
+import { SunMedium, TriangleAlert } from "lucide-react";
 
 interface WeatherCardProps {
   data: TripWeather;
@@ -41,7 +42,7 @@ export function WeatherCard({ data, activeDay }: WeatherCardProps) {
           <h2 className="text-sm font-bold text-gray-800">{city}天气预报</h2>
         </div>
         <div className="flex items-center gap-3 rounded-lg bg-gray-50 px-3 py-3">
-          <i className="fa-solid fa-cloud-sun text-lg text-gray-300" aria-hidden="true" />
+          <SunMedium size={18} className="text-gray-300" aria-hidden="true" />
           <p className="text-[11px] leading-relaxed text-gray-500">{hint}</p>
         </div>
       </div>
@@ -60,7 +61,7 @@ export function WeatherCard({ data, activeDay }: WeatherCardProps) {
       {/* 提醒条（黄色，贴卡顶） */}
       {head.reminders.length > 0 && (
         <div className="mb-4 flex items-start gap-2 rounded-lg border border-accent-100 bg-accent-50 px-3 py-2.5">
-          <i className="fa-solid fa-triangle-exclamation mt-0.5 shrink-0 text-xs text-accent-500" aria-hidden="true" />
+          <TriangleAlert size={12} className="mt-0.5 shrink-0 text-accent-500" aria-hidden="true" />
           <div className="space-y-1">
             {head.reminders.map((r) => (
               <p key={r} className="text-[11px] leading-relaxed text-accent-700">{r}</p>

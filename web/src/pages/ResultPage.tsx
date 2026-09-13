@@ -6,8 +6,9 @@ import { ShareDialog } from "@/components/share/ShareDialog";
 import { SafeDeliveryNotice } from "@/components/result/SafeDeliveryNotice";
 import { useTripStore } from "@/stores/tripStore";
 import { fetchResult, ApiRequestError } from "@/services/api";
-import { cityImageList } from "@/components/input/RotatingBackground";
+import { useCityPhotos } from "@/hooks/useCityPhotos";
 import type { TripResult } from "@/types/trip";
+import { Share2, Heart, SlidersHorizontal, MapPin, Lightbulb } from "lucide-react";
 
 export default function ResultPage() {
   const { resultId } = useParams<{ resultId: string }>();
@@ -36,6 +37,7 @@ export default function ResultPage() {
   const [result, setLocal] = useState<TripResult | null>(
     matched ? storeResult.data : null,
   );
+  const images = useCityPhotos(result?.city.name ?? "");
   const [loading, setLoading] = useState(!matched);
   // notfound=攻略不存在(404)；unsupported=旧版本生成不兼容(422)；generic=其他
   const [error, setError] = useState<{ kind: "notfound" | "unsupported" | "generic"; message: string } | null>(null);
@@ -116,7 +118,6 @@ export default function ResultPage() {
   if (result.plans.length === 1) return <DetailSkeleton />;
 
   const { city, request, plans } = result;
-  const images = cityImageList(city.name);
 
   return (
     <div className="relative min-h-screen">
@@ -137,20 +138,20 @@ export default function ResultPage() {
             onClick={() => setShareOpen(true)}
             className="flex items-center rounded-full border border-primary-100 bg-white/50 px-4 py-2 text-sm font-medium text-primary-700 transition-colors hover:bg-primary-50 sm:px-5"
           >
-            <i className="fas fa-share-nodes mr-1.5 text-primary-500 sm:mr-2" aria-hidden="true" /> 分享
+            <Share2 size={14} className="mr-1.5 text-primary-500 sm:mr-2" aria-hidden="true" /> 分享
           </button>
           <button
             disabled
             title="即将上线"
             className="flex items-center rounded-full border border-primary-100 bg-white/50 px-4 py-2 text-sm font-medium text-gray-400 cursor-not-allowed opacity-70 sm:px-5"
           >
-            <i className="far fa-heart mr-1.5 text-gray-300 sm:mr-2" aria-hidden="true" /> 收藏
+            <Heart size={14} className="mr-1.5 text-gray-300 sm:mr-2" aria-hidden="true" /> 收藏
           </button>
           <button
             onClick={() => navigate("/")}
             className="flex items-center rounded-full bg-primary-700 px-4 py-2 text-sm font-medium text-white shadow-lg transition-colors hover:bg-primary-600 sm:px-5"
           >
-            <i className="fas fa-sliders mr-1.5 sm:mr-2" aria-hidden="true" /> 调整偏好
+            <SlidersHorizontal size={14} className="mr-1.5 sm:mr-2" aria-hidden="true" /> 调整偏好
           </button>
         </div>
 
@@ -167,7 +168,7 @@ export default function ResultPage() {
             个方案
           </h1>
           <div className="inline-flex items-center rounded-full border border-primary-100/60 bg-white/70 px-4 py-1.5 text-sm text-gray-500 shadow-sm sm:text-base">
-            <i className="fas fa-map-marker-alt mr-2 text-primary-600" aria-hidden="true" />
+            <MapPin size={14} className="mr-2 text-primary-600" aria-hidden="true" />
             {city.name} · {request.days}天 · {request.people_count}人
           </div>
         </div>
@@ -194,7 +195,7 @@ export default function ResultPage() {
         <div className="mt-14 text-center">
           <p className="signature-font text-2xl text-primary-500 opacity-80">好行程，值得慢慢挑 ✦</p>
           <p className="mt-3 flex items-center justify-center gap-1.5 text-sm text-gray-400">
-            <i className="far fa-lightbulb text-gray-300" aria-hidden="true" />
+            <Lightbulb size={14} className="text-gray-300" aria-hidden="true" />
             方案均由 AI 智能生成，可
             <button onClick={() => navigate("/")} className="font-medium text-primary-600 hover:underline">
               调整偏好

@@ -1,10 +1,12 @@
-import { useState, useRef, useEffect, useId } from "react";
+import { useState, useRef, useEffect, type ReactNode } from "react";
+import { ChevronDown, Check } from "lucide-react";
+import { useId } from "react";
 
 export interface SelectOption<T extends string | number = string> {
   value: T;
   label: string;
   description?: string;
-  icon?: string;
+  icon?: ReactNode;
   disabled?: boolean;
 }
 
@@ -123,8 +125,9 @@ export function Select<T extends string | number = string>({
           </span>
         </div>
 
-        <i
-          className={`fa-solid fa-chevron-down text-[11px] text-gray-400 shrink-0 transition-transform duration-200 ${
+        <ChevronDown
+          size={11}
+          className={`text-gray-400 shrink-0 transition-transform duration-200 ${
             isOpen ? "rotate-180 text-primary-600" : ""
           }`}
         />
@@ -175,7 +178,7 @@ export function Select<T extends string | number = string>({
                   </div>
 
                   {isSelected && (
-                    <i className="fa-solid fa-check text-primary-600 text-xs shrink-0" />
+                    <Check size={12} className="text-primary-600 shrink-0" />
                   )}
                 </button>
               );

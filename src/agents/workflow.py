@@ -20,13 +20,29 @@ from src.agents import (
     itinerary_budget,
     llm,
     poi_alias,
+    poi_selection,
     route_planning,
-    semantic_grouping,
+)
+from src.agents.amap_poi_detail import (
+    AmapPoiDetailResult,
+    AmapPoiDetailTaskHandle,
+    amap_poi_detail_client_from_settings,
+    await_amap_poi_detail_at_writer_barrier,
+    settle_amap_poi_detail_task,
+    start_amap_poi_detail_task,
 )
 from src.agents.composition_blueprint import (
     build_base_composition_blueprints,
     enrich_blueprints_with_food,
     meal_role_recovery_metrics,
+)
+from src.agents.evidence_strength import (
+    StructuredEvidencePayload,
+    build_structured_evidence_payload,
+)
+from src.agents.pretrip_advice import (
+    PreTripAdvicePayload,
+    build_pretrip_advice_payload,
 )
 from src.agents.diversity import build_quality_metrics
 from src.agents.dispatch_resolver import (
@@ -37,7 +53,6 @@ from src.agents.intent_parser import (
     INTENT_SCHEMA_COERCION_DEFAULT_METADATA,
     parse_intent_with_metadata,
 )
-from src.agents.recommendation_scope import decide_recommendation_scope
 from src.agents.pace import (
     COMPACT_PACE_MARKERS,
     RELAXED_PACE_MARKERS,
@@ -45,14 +60,15 @@ from src.agents.pace import (
     generation_base_mode,
 )
 from src.agents.route_notices import (
+    ACCOMMODATION_UNRESOLVED_NOTICE,
     ACCOMMODATION_FALLBACK_NOTICE,
-    MISSING_ALTERNATIVE_NOTICE,
     NO_USABLE_ROUTE_NOTICE,
     ROUTE_DEGRADATION_NOTICE,
     TRANSPORT_STATIC_FALLBACK_NOTICE,
 )
 from src.agents.schema import (
     AccommodationSuggestion,
+    CandidatePlace,
     PlanOutput,
     RetrievalResult,
     RoutePlan,
@@ -90,6 +106,173 @@ from src.pipeline.db import get_session_factory
 
 logger = logging.getLogger(__name__)
 WORKFLOW_HARD_TIMEOUT_SECONDS = 180.0
+
+
+class StructuredTripRequestRequiredError(ValueError):
+    """Natural-language workflow entry is disabled for the hosted product."""
+
+    code = "STRUCTURED_TRIP_REQUEST_REQUIRED"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "trip_request is required; natural-language Intent Parser entry "
+            "is temporarily disabled"
+        )
+
+
+def flatten_locked_places_from_routes(
+    route_plans: list[RoutePlan],
+) -> list[CandidatePlace]:
+    places: list[CandidatePlace] = []
+    for route_plan in route_plans:
+        for day_group in route_plan.day_groups:
+            places.extend(list(day_group.places))
+    return places
+
+
+def start_amap_poi_detail_for_locked_routes(
+    route_plans: list[RoutePlan],
+    *,
+    settings=None,
+) -> AmapPoiDetailTaskHandle:
+    resolved = settings or get_settings()
+    client = amap_poi_detail_client_from_settings(resolved)
+    return start_amap_poi_detail_task(
+        client,
+        flatten_locked_places_from_routes(route_plans),
+    )
+
+
+def build_plan_scoped_pretrip_advice_payloads(
+    *,
+    trip_request: TripRequest,
+    route_plans: list[RoutePlan],
+    weather_advisory_payload,
+    structured_evidence_payload: StructuredEvidencePayload | None,
+    amap_facts,
+) -> list[PreTripAdvicePayload]:
+    return [
+        build_pretrip_advice_payload(
+            trip_request=trip_request,
+            route_plan=route_plan,
+            weather_advisory_payload=weather_advisory_payload,
+            structured_evidence_payload=structured_evidence_payload,
+            amap_facts=amap_facts,
+        )
+        for route_plan in route_plans
+    ]
+
+
+def content_free_pretrip_advice_metrics(
+    amap_result: AmapPoiDetailResult,
+    payloads: list[PreTripAdvicePayload],
+) -> dict:
+    metrics = dict(amap_result.content_free_metrics())
+    metrics["pretrip_advice_plan_count"] = len(payloads)
+    metrics["pretrip_advice_note_evidence_count"] = sum(
+        len(payload.note_tip_evidence) for payload in payloads
+    )
+    metrics["pretrip_advice_amap_fact_count"] = sum(
+        len(payload.amap_tip_facts) for payload in payloads
+    )
+    return metrics
+
+
+async def _enrich_after_budget_lock(
+    *,
+    trip_request: TripRequest,
+    retrieval: RetrievalResult,
+    route_plans: list[RoutePlan],
+    must_include_resolution,
+    pre_route_selection_quality: dict,
+) -> tuple[
+    AmapPoiDetailTaskHandle,
+    list,
+    list,
+    dict,
+    dict,
+    dict,
+    dict,
+]:
+    amap_handle = start_amap_poi_detail_for_locked_routes(route_plans)
+    try:
+        poi_identity_results = poi_alias.build_poi_identity_results(
+            route_plans,
+            retrieval.candidates,
+        )
+        base_blueprints = build_base_composition_blueprints(
+            route_plans,
+            trip_request,
+        )
+        food_enrichment = await enrich_blueprints_with_food(
+            base_blueprints,
+            route_plans,
+            trip_request,
+            get_session_factory(),
+            get_settings(),
+        )
+        composition_blueprints = food_enrichment.blueprints
+        post_budget_route_quality = _build_post_budget_route_quality(
+            trip_request=trip_request,
+            retrieval=retrieval,
+            route_plans=route_plans,
+            pre_route_selection_quality=pre_route_selection_quality,
+            must_include_resolution=must_include_resolution,
+        )
+        return (
+            amap_handle,
+            poi_identity_results,
+            composition_blueprints,
+            food_enrichment.attachment_auth_map,
+            food_enrichment.meal_attachment_map,
+            meal_role_recovery_metrics(route_plans, composition_blueprints),
+            post_budget_route_quality,
+        )
+    except BaseException:
+        await settle_amap_poi_detail_task(amap_handle)
+        raise
+
+
+async def await_writer_barrier_and_build_pretrip_advice(
+    amap_handle: AmapPoiDetailTaskHandle | None,
+    *,
+    trip_request: TripRequest,
+    retrieval: RetrievalResult,
+    route_plans: list[RoutePlan],
+    composition_blueprints: list,
+    weather_advisory_payload,
+) -> tuple[
+    AmapPoiDetailResult,
+    StructuredEvidencePayload | None,
+    list[PreTripAdvicePayload],
+    dict,
+]:
+    if amap_handle is None:
+        amap_result = AmapPoiDetailResult()
+    else:
+        amap_result = await await_amap_poi_detail_at_writer_barrier(amap_handle)
+    if not route_plans:
+        return amap_result, None, [], content_free_pretrip_advice_metrics(
+            amap_result, []
+        )
+    structured_evidence_payload = build_structured_evidence_payload(
+        retrieval,
+        route_plans=route_plans,
+        composition_blueprints=composition_blueprints,
+    )
+    payloads = build_plan_scoped_pretrip_advice_payloads(
+        trip_request=trip_request,
+        route_plans=route_plans,
+        weather_advisory_payload=weather_advisory_payload,
+        structured_evidence_payload=structured_evidence_payload,
+        amap_facts=amap_result.facts,
+    )
+    return (
+        amap_result,
+        structured_evidence_payload,
+        payloads,
+        content_free_pretrip_advice_metrics(amap_result, payloads),
+    )
 
 
 def _date_or_none(value: str | None) -> date | None:
@@ -209,6 +392,85 @@ def _publish_retry_is_body_incomplete(decision: DispatchDecision) -> bool:
     )
 
 
+def _build_content_dispatch_failure(
+    signal: ContentDispatchSignal,
+    generation_metrics: dict,
+) -> publish_gate.PublishGateError:
+    """Preserve only authoritative dispatch facts while converting the signal."""
+    known_plan_indexes = list(dict.fromkeys(
+        index
+        for index in signal.decision.plan_indexes
+        if isinstance(index, int)
+        and not isinstance(index, bool)
+        and index > 0
+    ))
+    reason_plan_indexes = (
+        {signal.decision.reasons[0]: list(known_plan_indexes)}
+        if len(signal.decision.reasons) == 1 and known_plan_indexes
+        else {}
+    )
+    findings = [
+        publish_gate.PublishFinding(
+            reason=reason,
+            message="; ".join(signal.decision.notes) or reason,
+            plan_index=(
+                reason_plan_indexes.get(reason, [None])[0]
+                if reason in reason_plan_indexes
+                else None
+            ),
+        )
+        for reason in (signal.decision.reasons or ["fail_closed"])
+    ]
+    error = publish_gate.PublishGateError(
+        publish_gate.PublishGateResult(passed=False, findings=findings)
+    )
+    reason_set = set(signal.decision.reasons)
+    retry_eligible = bool(reason_set) and reason_set.issubset(
+        STRUCTURAL_INCOMPLETE_REASONS
+    )
+    local_recovery_attempted = (
+        generation_metrics.get("fragment_repair_attempted") is True
+        or generation_metrics.get("safe_renderer_attempted") is True
+    )
+    setattr(error, "trace_truth_retry_eligible", retry_eligible)
+    setattr(error, "trace_truth_reason_plan_indexes", reason_plan_indexes)
+    setattr(
+        error,
+        "trace_truth_local_recovery_attempted",
+        local_recovery_attempted,
+    )
+    if retry_eligible and any(
+        "remaining_budget" in note for note in signal.decision.notes
+    ):
+        skip_reason = "INSUFFICIENT_TIME_BUDGET"
+    elif local_recovery_attempted:
+        skip_reason = "SAFE_OR_LOCAL_RECOVERY_SELECTED"
+    else:
+        skip_reason = "REASON_NOT_ELIGIBLE"
+    setattr(error, "trace_truth_retry_not_attempted_reason", skip_reason)
+    return error
+
+
+def _attach_pipeline_recovery_facts(
+    error: Exception,
+    metrics: dict,
+) -> Exception:
+    """Attach explicit recovery-attempt facts without changing the exception."""
+    local_recovery_attempted = (
+        metrics.get("fragment_repair_attempted") is True
+        or metrics.get("safe_renderer_attempted") is True
+    )
+    if local_recovery_attempted:
+        setattr(error, "trace_truth_local_recovery_attempted", True)
+        setattr(
+            error,
+            "trace_truth_retry_not_attempted_reason",
+            "SAFE_OR_LOCAL_RECOVERY_SELECTED",
+        )
+        setattr(error, "trace_truth_retry_eligible", False)
+    return error
+
+
 async def run_trip_workflow(
     user_text: str,
     *,
@@ -221,6 +483,11 @@ async def run_trip_workflow(
     must_include_resolution: MustIncludeResolution | None = None,
     workflow_deadline_monotonic: float | None = None,
 ) -> WorkflowResult:
+    if trip_request is None:
+        # Keep the legacy Intent Parser implementation for a future product
+        # entrypoint, but disable it while Web/BFF /trip/async supplies the
+        # authoritative structured TripRequest.
+        raise StructuredTripRequestRequiredError()
     local_deadline = time.monotonic() + WORKFLOW_HARD_TIMEOUT_SECONDS
     if workflow_deadline_monotonic is None:
         workflow_deadline_monotonic = local_deadline
@@ -234,6 +501,7 @@ async def run_trip_workflow(
     token, llm_records = llm.start_llm_observation()
     stage_timing_token = start_stage_timing_observation()
     cost_prefetches: list[IntercityCostPrefetch] = []
+    amap_handles: list[AmapPoiDetailTaskHandle] = []
     try:
         with llm.llm_call_context(
             workflow_deadline_monotonic=workflow_deadline_monotonic,
@@ -251,6 +519,7 @@ async def run_trip_workflow(
                     llm_records=llm_records,
                     workflow_deadline_monotonic=workflow_deadline_monotonic,
                     cost_prefetches=cost_prefetches,
+                    amap_handles=amap_handles,
                 ),
                 timeout=remaining_seconds,
             )
@@ -267,6 +536,8 @@ async def run_trip_workflow(
             logger.exception("failed to flush llm observation on workflow failure")
         raise
     finally:
+        for handle in amap_handles:
+            await settle_amap_poi_detail_task(handle)
         for prefetch in cost_prefetches:
             await cancel_intercity_cost_prefetch(prefetch)
         stop_stage_timing_observation(stage_timing_token)
@@ -286,12 +557,15 @@ async def _run_trip_workflow_inner(
     llm_records: list[dict] | None = None,
     workflow_deadline_monotonic: float | None = None,
     cost_prefetches: list[IntercityCostPrefetch] | None = None,
+    amap_handles: list[AmapPoiDetailTaskHandle] | None = None,
 ) -> WorkflowResult:
     """Full pipeline: parse -> retrieve -> route -> write/review -> persist.
 
-    If *trip_request* is provided the Intent Parser step is skipped. Optional
-    callbacks support async worker progress updates without coupling workflow
-    to job storage.
+    The hosted Web/BFF entry always provides *trip_request*, so the Intent
+    Parser step is skipped. Its legacy implementation below is intentionally
+    retained for a future explicitly authorized natural-language entrypoint.
+    Optional callbacks support async worker progress updates without coupling
+    workflow to job storage.
 
     Absolute 180s deadline starts at workflow entry and is never reset by
     Publish Retry / Fragment Repair.
@@ -310,6 +584,8 @@ async def _run_trip_workflow_inner(
         must_include_resolution = None
 
     if trip_request is None:
+        # Unreachable from run_trip_workflow while the structured Web/BFF
+        # /trip/async product entry is enforced; retained for future reuse.
         logger.info("[1/5] Intent Parser ...")
         intent_parser_metadata = dict(INTENT_SCHEMA_COERCION_DEFAULT_METADATA)
 
@@ -384,12 +660,12 @@ async def _run_trip_workflow_inner(
     route_notices: list[str] = []
     settings = get_settings()
     transport: TransportSuggestion | None = None
+    accommodation_context = None
+    coupling_enabled = bool(getattr(settings, "selector_route_v2_enabled", False) and getattr(settings, "accommodation_route_coupling_enabled", False))
     async with get_session_factory()() as session:
-        accommodation_coro = accommodation_resolver.resolve_accommodation(
-            trip_request,
-            retrieval,
-            session,
-        )
+        resolver = (accommodation_resolver.resolve_accommodation_context if coupling_enabled
+                    else accommodation_resolver.resolve_accommodation)
+        accommodation_coro = resolver(trip_request, retrieval, session)
         if settings.intercity_transport_enabled:
             shared_outbound = (
                 cost_intercity_prefetch.outbound_task
@@ -406,6 +682,10 @@ async def _run_trip_workflow_inner(
             )
         else:
             accommodation = await accommodation_coro
+    if coupling_enabled:
+        accommodation_context = accommodation
+        accommodation = (accommodation_context.anchors[0].suggestion
+                         if accommodation_context.state == "fixed" else None)
     if _accommodation_fallback_notice_required(
         trip_request,
         accommodation,
@@ -418,29 +698,48 @@ async def _run_trip_workflow_inner(
         else None
     )
 
-    logger.info("[3/6] Semantic Grouping ...")
-    semantic_grouping_metrics = semantic_grouping.SemanticGroupingMetrics()
-
-    async def run_semantic_grouping():
-        nonlocal semantic_grouping_metrics
-        semantic_grouping_metrics = await semantic_grouping.group_candidates(
+    logger.info("[3/6] POI Selection ...")
+    selection_pool = route_planning._route_planning_candidate_pool(
+        retrieval,
+        must_include_ids=route_planning.valid_must_include_ids(
             trip_request,
             retrieval,
-        )
-        return semantic_grouping_metrics
+        ),
+    )
+    selector_input = poi_selection.build_poi_selection_input(
+        trip_request,
+        selection_pool,
+        accommodation=accommodation,
+        must_include_place_ids=(
+            must_include_resolution.matched_place_ids
+            if must_include_resolution is not None
+            else None
+        ),
+    )
+    poi_selection_metrics = poi_selection.PoiSelectionMetrics()
+    selection_result = None
 
-    semantic_grouping_metrics = await _run_observed_step(
-        "SEMANTIC_GROUPING",
-        run_semantic_grouping,
+    async def run_poi_selection():
+        nonlocal poi_selection_metrics, selection_result
+        execution = await poi_selection.select_pois(
+            selector_input,
+            workflow_deadline_monotonic=workflow_deadline_monotonic,
+        )
+        poi_selection_metrics = execution.metrics
+        selection_result = execution.result
+        return execution.result
+
+    selection_result = await _run_observed_step(
+        "POI_SELECTION",
+        run_poi_selection,
         on_stage=on_stage,
         on_stage_event=on_stage_event,
-        metadata=semantic_grouping_metrics.to_stage_metadata(),
-        finish_metadata=lambda: semantic_grouping_metrics.to_stage_metadata(),
+        metadata=poi_selection_metrics.to_stage_metadata(),
+        finish_metadata=lambda: poi_selection_metrics.to_stage_metadata(),
     )
 
     logger.info("[4/6] Route Planning ...")
     route_metrics = route_planning.RoutePlanningMetrics()
-    recommendation_scope = decide_recommendation_scope(trip_request)
 
     async def run_route_planning():
         try:
@@ -452,10 +751,20 @@ async def _run_trip_workflow_inner(
         kwargs = {}
         if "metrics" in route_signature:
             kwargs["metrics"] = route_metrics
-        if "target_plan_count" in route_signature:
-            kwargs["target_plan_count"] = recommendation_scope.target_plan_count
+        if "selection" in route_signature:
+            kwargs["selection"] = selection_result
+        elif "target_plan_count" in route_signature:
+            # Narrow compatibility for injected historical route doubles. The
+            # production planner exposes ``selection`` and never takes this branch.
+            kwargs["target_plan_count"] = 1
+        if accommodation_context is not None:
+            kwargs["accommodation_context"] = accommodation_context
+        if "accommodation_source" in route_signature:
+            kwargs["accommodation_source"] = accommodation.source if accommodation is not None else "auto_recommended"
         if "accommodation_coord" in route_signature:
             kwargs["accommodation_coord"] = accommodation_coord
+        if "workflow_deadline_monotonic" in route_signature:
+            kwargs["workflow_deadline_monotonic"] = workflow_deadline_monotonic
         if kwargs:
             return await route_planning.plan_routes(
                 trip_request,
@@ -493,17 +802,9 @@ async def _run_trip_workflow_inner(
                 route_plans=route_plans,
                 record_id=None,
             )
-        if (
-            recommendation_scope.target_plan_count > 1
-            and len(usable_route_plans) < recommendation_scope.target_plan_count
-        ):
-            logger.warning(
-                "Route Planning produced only %d usable plan(s)",
-                len(usable_route_plans),
-            )
-            route_notices.append(MISSING_ALTERNATIVE_NOTICE)
-        if len(usable_route_plans) != len(route_plans):
-            route_plans = usable_route_plans
+        if len(usable_route_plans) != 1 or len(route_plans) != 1:
+            raise RuntimeError("POI selection must produce exactly one usable route")
+        route_plans = usable_route_plans
         complete_day_route_plans = [
             plan for plan in route_plans
             if len(plan.day_groups) == trip_request.days
@@ -522,25 +823,40 @@ async def _run_trip_workflow_inner(
                 route_plans=route_plans,
                 record_id=None,
             )
-        if len(complete_day_route_plans) != len(route_plans):
-            logger.warning(
-                "Route Planning dropped %d shortened plan(s) before writing",
-                len(route_plans) - len(complete_day_route_plans),
-            )
-            if recommendation_scope.target_plan_count > 1:
-                route_notices.append(MISSING_ALTERNATIVE_NOTICE)
-            route_plans = complete_day_route_plans
-            route_metrics.plan_count = len(route_plans)
-        if (
-            route_plans
-            and recommendation_scope.target_plan_count < len(route_plans)
-        ):
-            route_plans = route_plans[:recommendation_scope.target_plan_count]
-            route_metrics.plan_count = len(route_plans)
+        route_plans = complete_day_route_plans
+        route_metrics.plan_count = 1
+        if coupling_enabled:
+            locked = route_plans[0]
+            accommodation = locked.accommodation_anchor.suggestion if locked.accommodation_anchor else None
+            accommodation_coord = (accommodation.latitude, accommodation.longitude) if accommodation else None
+    except (
+        route_planning.RoutePlanInvariantError,
+        route_planning.RouteMustIncludeConflictError,
+        route_planning.SelectedRoutePreciseConflictError,
+    ) as exc:
+        logger.warning("Route Planning found no usable route", exc_info=True)
+        return WorkflowResult(
+            trip_request=trip_request,
+            plans=[],
+            result_type="NO_USABLE_ROUTE",
+            review_notes=(ACCOMMODATION_UNRESOLVED_NOTICE if accommodation_context is not None
+                and accommodation_context.state == "user_unresolved" else NO_USABLE_ROUTE_NOTICE),
+            quality_metrics=(
+                {**({"accommodation_failure_code": "ACCOMMODATION_UNRESOLVED"
+                    if accommodation_context.state == "user_unresolved" else "ROUTE_SEARCH_EXHAUSTED"}
+                    if accommodation_context is not None else {}),
+                 "route_planning": {
+                    **route_metrics.to_dict(),
+                    "failure_codes": list(getattr(exc, "violations", ()))
+                    or [getattr(exc, "reason", "route_infeasible")],
+                }} if settings.selector_route_v2_enabled else {}
+            ),
+            route_plans=[],
+            record_id=None,
+        )
     except Exception:
         logger.exception("Route Planning failed")
-        route_plans = []
-        route_notices.append(ROUTE_DEGRADATION_NOTICE)
+        raise
 
     pre_route_selection_quality = route_metrics.route_quality_metrics()
     post_budget_route_quality: dict[str, Any] = {}
@@ -549,6 +865,10 @@ async def _run_trip_workflow_inner(
     composition_blueprints = []
     meal_attachment_map = {}
     meal_recovery_metrics = {}
+    attachment_auth_map = {}
+    amap_handle: AmapPoiDetailTaskHandle | None = None
+    if amap_handles is None:
+        amap_handles = []
     if route_plans:
         try:
             budget_signature = inspect.signature(
@@ -564,6 +884,13 @@ async def _run_trip_workflow_inner(
             trip_request,
             **budget_kwargs,
         )
+        if any(plan.route_policy_version == "selector-route-v2" for plan in route_plans):
+            if len(budget_results) != len(route_plans) or any(
+                len(result.days) != trip_request.days or any(day.status == "infeasible" for day in result.days)
+                for result in budget_results
+            ):
+                return WorkflowResult(trip_request=trip_request, plans=[], result_type="NO_USABLE_ROUTE",
+                    review_notes=NO_USABLE_ROUTE_NOTICE, route_plans=route_plans, record_id=None)
         resolved_pairs = [
             (route_plan, budget_result)
             for route_plan, budget_result in zip(route_plans, budget_results)
@@ -601,19 +928,10 @@ async def _run_trip_workflow_inner(
                 route_plans=route_plans,
                 record_id=None,
             )
-        if len(complete_budget_route_pairs) != len(route_plans):
-            logger.warning(
-                "Budget resolution dropped %d shortened plan(s) before writing",
-                len(route_plans) - len(complete_budget_route_pairs),
-            )
-            if recommendation_scope.target_plan_count > 1:
-                route_notices.append(MISSING_ALTERNATIVE_NOTICE)
-            route_plans = [
-                route_plan for route_plan, _ in complete_budget_route_pairs
-            ]
-            budget_results = [
-                budget_result for _, budget_result in complete_budget_route_pairs
-            ]
+        route_plans = [route_plan for route_plan, _ in complete_budget_route_pairs]
+        budget_results = [
+            budget_result for _, budget_result in complete_budget_route_pairs
+        ]
         if not route_plans:
             return WorkflowResult(
                 trip_request=trip_request,
@@ -623,41 +941,52 @@ async def _run_trip_workflow_inner(
                 route_plans=[],
                 record_id=None,
             )
-        poi_identity_results = poi_alias.build_poi_identity_results(
-            route_plans,
-            retrieval.candidates,
-        )
-        base_blueprints = build_base_composition_blueprints(
-            route_plans,
-            trip_request,
-        )
-        food_enrichment = await enrich_blueprints_with_food(
-            base_blueprints,
-            route_plans,
-            trip_request,
-            get_session_factory(),
-            get_settings(),
-        )
-        composition_blueprints = food_enrichment.blueprints
-        attachment_auth_map = food_enrichment.attachment_auth_map
-        meal_attachment_map = food_enrichment.meal_attachment_map
-        meal_recovery_metrics = meal_role_recovery_metrics(
-            route_plans,
+        if len(route_plans) != 1:
+            raise RuntimeError("budget resolution must preserve one locked route")
+        if route_plans[0].membership_ledger is not None:
+            route_metrics.record_membership_ledger(
+                route_planning.refresh_selection_membership_ledger(
+                    route_plans[0],
+                    selection=selection_result,
+                    qualified_pool=selection_pool,
+                    request=trip_request,
+                )
+            )
+        (
+            amap_handle,
+            poi_identity_results,
             composition_blueprints,
-        )
-        post_budget_route_quality = _build_post_budget_route_quality(
+            attachment_auth_map,
+            meal_attachment_map,
+            meal_recovery_metrics,
+            post_budget_route_quality,
+        ) = await _enrich_after_budget_lock(
             trip_request=trip_request,
             retrieval=retrieval,
             route_plans=route_plans,
-            pre_route_selection_quality=pre_route_selection_quality,
             must_include_resolution=must_include_resolution,
+            pre_route_selection_quality=pre_route_selection_quality,
         )
+        amap_handles.append(amap_handle)
 
     logger.info("[5/6] Final Writer ...")
     logger.info("[6/6] YunTu Review ...")
     weather_advisory_payload = await build_weather_advisory_payload(
         trip_request=trip_request,
         user_text=user_text,
+    )
+    (
+        _amap_detail_result,
+        structured_evidence_payload,
+        pretrip_advice_payloads,
+        amap_advice_metrics,
+    ) = await await_writer_barrier_and_build_pretrip_advice(
+        amap_handle,
+        trip_request=trip_request,
+        retrieval=retrieval,
+        route_plans=route_plans,
+        composition_blueprints=composition_blueprints,
+        weather_advisory_payload=weather_advisory_payload,
     )
     publish_retry_count = 0
     full_writer_generation_count = 1
@@ -680,6 +1009,9 @@ async def _run_trip_workflow_inner(
             transport=transport,
             attachment_auth_map=attachment_auth_map,
             weather_advisory_payload=weather_advisory_payload,
+            structured_evidence_payload=structured_evidence_payload,
+            pretrip_advice_payloads=pretrip_advice_payloads,
+            amap_poi_detail_metrics=amap_advice_metrics,
             on_stage=on_stage,
             on_stage_event=on_stage_event,
             on_writer_output=on_writer_output,
@@ -690,6 +1022,7 @@ async def _run_trip_workflow_inner(
             workflow_deadline_monotonic=workflow_deadline_monotonic,
             residual_reserve_seconds=20.0,
             speculative_initial_generation=(publish_retry_count == 0),
+            require_selected_route_lock=True,
         )
         try:
             plans, review_notes, publish_result, generation_metrics = await pipeline.run()
@@ -706,66 +1039,91 @@ async def _run_trip_workflow_inner(
                 fragment_repair_call_count,
                 int(generation_metrics.get("fragment_repair_call_count") or 0),
             )
-            decision = signal.decision
-            if (
-                decision.action == "PUBLISH_RETRY"
-                and not _publish_retry_is_body_incomplete(decision)
-            ):
-                decision = DispatchDecision(
-                    action="FAIL_CLOSED",
-                    reasons=decision.reasons,
-                    plan_indexes=decision.plan_indexes,
-                    fragment_issue_codes=decision.fragment_issue_codes,
-                    notes=[
-                        *decision.notes,
-                        "outer retry guard rejected non-incomplete reason",
-                    ],
-                    skip_review=decision.skip_review,
-                )
-                signal.decision = decision
-            if (
-                decision.action == "PUBLISH_RETRY"
-                and publish_retry_count < 1
-            ):
-                publish_retry_feedback = _build_publish_retry_feedback(
+            async def validate_outer_dispatch() -> DispatchDecision:
+                decision = signal.decision
+                if (
+                    decision.action == "PUBLISH_RETRY"
+                    and not _publish_retry_is_body_incomplete(decision)
+                ):
+                    decision = DispatchDecision(
+                        action="FAIL_CLOSED",
+                        reasons=decision.reasons,
+                        plan_indexes=decision.plan_indexes,
+                        fragment_issue_codes=decision.fragment_issue_codes,
+                        notes=[
+                            *decision.notes,
+                            "outer retry guard rejected non-incomplete reason",
+                        ],
+                        skip_review=decision.skip_review,
+                    )
+                    signal.decision = decision
+                if (
+                    decision.action == "PUBLISH_RETRY"
+                    and publish_retry_count < 1
+                ):
+                    return decision
+
+                # Fail closed after retry budget or non-retry dispatch.
+                raise _build_content_dispatch_failure(
+                    signal,
+                    generation_metrics,
+                ) from signal
+
+            decision = await _run_observed_step(
+                "CONTENT_VALIDATION",
+                validate_outer_dispatch,
+                on_stage_event=on_stage_event,
+                set_current_stage=False,
+                attempt=1 + publish_retry_count,
+                publish_retry_round=publish_retry_count,
+                metadata={"validation_boundary": "outer_retry_control"},
+            )
+            next_publish_retry_round = publish_retry_count + 1
+
+            async def admit_publish_retry() -> list[dict]:
+                return _build_publish_retry_feedback(
                     signal=signal,
                     pipeline=pipeline,
                     trip_request=trip_request,
                     retrieval=retrieval,
                     route_plans=route_plans,
                 )
-                publish_retry_count += 1
-                full_writer_generation_count += 1
-                logger.info(
-                    "Dispatch PUBLISH_RETRY on same lock (round=%s reasons=%s)",
-                    publish_retry_count,
-                    ",".join(decision.reasons[:5]),
-                )
-                continue
-            # Fail closed after retry budget or non-retry dispatch.
-            findings = [
-                publish_gate.PublishFinding(
-                    reason=reason,
-                    message="; ".join(signal.decision.notes) or reason,
-                )
-                for reason in (signal.decision.reasons or ["fail_closed"])
-            ]
-            if not findings:
-                findings = [
-                    publish_gate.PublishFinding(
-                        reason="fail_closed",
-                        message="; ".join(signal.decision.notes) or "dispatch fail-closed",
-                    )
-                ]
-            raise publish_gate.PublishGateError(
-                publish_gate.PublishGateResult(passed=False, findings=findings)
-            ) from signal
+
+            publish_retry_feedback = await _run_observed_step(
+                "PUBLISH_RETRY",
+                admit_publish_retry,
+                on_stage_event=on_stage_event,
+                set_current_stage=False,
+                attempt=1 + next_publish_retry_round,
+                publish_retry_round=next_publish_retry_round,
+                metadata={
+                    "reason_count": len(decision.reasons),
+                    "next_publish_retry_round": next_publish_retry_round,
+                },
+            )
+            publish_retry_count = next_publish_retry_round
+            full_writer_generation_count += 1
+            logger.info(
+                "Dispatch PUBLISH_RETRY on same lock (round=%s reasons=%s)",
+                publish_retry_count,
+                ",".join(decision.reasons[:5]),
+            )
+            continue
+
+        except Exception as error:
+            pipeline_metrics = pipeline.metrics.to_dict()
+            _attach_pipeline_recovery_facts(error, pipeline_metrics)
+            raise
 
     route_plans = pipeline.route_plans
+    if coupling_enabled:
+        for output in plans:
+            output.accommodation = accommodation.model_copy(deep=True) if accommodation else None
     poi_identity_results = pipeline.poi_identity_results or []
     budget_results = pipeline.budget_results or []
     composition_blueprints = pipeline.composition_blueprints or []
     generation_metrics = dict(generation_metrics or {})
+    generation_metrics.update(amap_advice_metrics)
     generation_metrics["publish_retry_count"] = publish_retry_count
     generation_metrics["full_writer_generation_count"] = full_writer_generation_count
     generation_metrics["fragment_repair_call_count"] = fragment_repair_call_count
@@ -846,9 +1204,8 @@ async def _run_trip_workflow_inner(
             "publish_retry_count": publish_retry_count,
             "route_planning": route_metrics.to_dict(),
             **route_quality_metrics,
-            "semantic_grouping": semantic_grouping_metrics.to_dict(),
+            "poi_selection": poi_selection_metrics.to_dict(),
             **llm.summarize_llm_call_records(llm_records or []),
-            "recommendation_scope": recommendation_scope.to_metrics(),
             **meal_recovery_metrics,
             **weather_advisory_payload.metrics_summary(),
             **must_include_metrics,
@@ -1263,6 +1620,17 @@ async def _save_plan_record(user_text: str, result: WorkflowResult) -> int:
             ),
             "cost_estimate_snapshot": snapshot.model_dump(mode="json"),
         })
+        # v0.9.9.6: persist only non-empty sanitized advice; empty/None fields
+        # are omitted. The PlanOutput fields already carry post-sanitizer public
+        # shapes (no evidence_ref / source metadata), so model dumps are clean.
+        if p.packing_checklist:
+            generated_plans[-1]["packing_checklist"] = [
+                group.model_dump(mode="json") for group in p.packing_checklist
+            ]
+        if p.travel_tips:
+            generated_plans[-1]["travel_tips"] = [
+                tip.model_dump(mode="json") for tip in p.travel_tips
+            ]
         if weather_display:
             generated_plans[-1]["weather_display"] = weather_display
         if p.composition_blueprint is not None:

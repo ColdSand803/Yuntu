@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Calendar, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
 
 interface DateRangeInputProps {
   startDate: string; // YYYY-MM-DD
@@ -171,13 +172,17 @@ export function DateRangeInput({ startDate, endDate, onStartChange, onEndChange 
             open ? "bg-white shadow-md ring-2 ring-primary-300" : "hover:bg-gray-200/80 shadow-inner"
           }`}
         >
-          <i className="far fa-calendar text-primary-500" aria-hidden="true" />
+          <Calendar size={16} className="text-primary-500" aria-hidden="true" />
           <span className="ml-3 flex flex-1 items-center gap-2 text-sm">
             <span className={sIso ? "text-gray-700" : "text-gray-400"}>{formatDisplay(startDate)}</span>
             <span className="text-gray-300" aria-hidden="true">~</span>
             <span className={eIso ? "text-gray-700" : "text-gray-400"}>{formatDisplay(endDate)}</span>
           </span>
-          <i className={`fas fa-chevron-down text-xs text-gray-400 transition-transform ${open ? "rotate-180" : ""}`} aria-hidden="true" />
+          <ChevronDown
+            size={12}
+            className={`text-gray-400 transition-transform ${open ? "rotate-180" : ""}`}
+            aria-hidden="true"
+          />
         </button>
 
         {/* 日历弹层 */}
@@ -195,7 +200,7 @@ export function DateRangeInput({ startDate, endDate, onStartChange, onEndChange 
                 aria-label="上个月"
                 className="flex h-8 w-8 items-center justify-center rounded-lg text-gray-500 transition-colors hover:bg-primary-50 hover:text-primary-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-300"
               >
-                <i className="fas fa-chevron-left text-xs" aria-hidden="true" />
+                <ChevronLeft size={12} aria-hidden="true" />
               </button>
               <span className="text-sm font-bold text-gray-800">
                 {viewDate.getFullYear()} 年 {MONTH_NAMES[viewDate.getMonth()]}
@@ -206,7 +211,7 @@ export function DateRangeInput({ startDate, endDate, onStartChange, onEndChange 
                 aria-label="下个月"
                 className="flex h-8 w-8 items-center justify-center rounded-lg text-gray-500 transition-colors hover:bg-primary-50 hover:text-primary-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-300"
               >
-                <i className="fas fa-chevron-right text-xs" aria-hidden="true" />
+                <ChevronRight size={12} aria-hidden="true" />
               </button>
             </div>
 

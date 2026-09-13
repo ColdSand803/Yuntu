@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 
 from src.agents.writer_relay_store import (
+    ALLOWED_ENDPOINTS,
     PARTICIPATING_ENDPOINTS,
     DispatchClaim,
     EndpointCapacity,
@@ -135,7 +136,7 @@ def frozen_writer_pool(config: Any) -> tuple[dict[str, Any], dict[str, str]]:
     endpoints: dict[str, Any] = {}
     for endpoint in config.relay_pool:
         name = normalize_endpoint_name(endpoint.name)
-        if name in PARTICIPATING_ENDPOINTS:
+        if name in ALLOWED_ENDPOINTS:
             resolved_model = str(endpoint.model or config.model)
             if resolved_model != WRITER_MODEL:
                 raise ValueError(
@@ -258,7 +259,10 @@ class WriterRelayRouter:
             return
         async with self._sync_lock:
             if self._synchronized != frozen:
-                await self.store.synchronize_endpoints(fingerprints)
+                await self.store.synchronize_endpoints(
+                    fingerprints,
+                    now=self._utcnow(),
+                )
                 self._synchronized = frozen
 
     async def _admit(

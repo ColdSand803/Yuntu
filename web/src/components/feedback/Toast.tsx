@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useToastStore } from "@/stores/toastStore";
+import { CheckCircle2, CircleX } from "lucide-react";
 
 export function Toast() {
   const { message, type, visible, hideToast } = useToastStore();
@@ -26,10 +27,11 @@ export function Toast() {
             : "bg-red-500 text-white"
         }`}
       >
-        <i
-          className={`fa-solid ${type === "success" ? "fa-circle-check" : "fa-circle-xmark"}`}
-          aria-hidden="true"
-        />
+        {type === "success" ? (
+          <CheckCircle2 size={16} aria-hidden="true" />
+        ) : (
+          <CircleX size={16} aria-hidden="true" />
+        )}
         {message}
       </div>
     </div>

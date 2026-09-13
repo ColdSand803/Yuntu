@@ -88,6 +88,37 @@ def lookup_admission(
     )
 
 
+def lookup_admission_by_label(
+    catalog: ReferenceCatalog, *, place_label: str, city: str
+) -> AdmissionReference | None:
+    """Fuzzy admission lookup by place_label and city.
+
+    Falls back to substring match when exact label match fails.  This bridges
+    the gap between the route plan's canonical-place identities and the
+    catalog's official: identities.
+    """
+    if catalog.review_status != "reviewed":
+        return None
+    reviewed = _reviewed(catalog.admission)
+    # 1. exact label + city
+    exact = next(
+        (item for item in reviewed if item.city == city and item.place_label == place_label),
+        None,
+    )
+    if exact is not None:
+        return exact
+    # 2. substring: catalog label in place_label or vice versa (same city)
+    return next(
+        (
+            item
+            for item in reviewed
+            if item.city == city
+            and (item.place_label in place_label or place_label in item.place_label)
+        ),
+        None,
+    )
+
+
 def lookup_meal(
     catalog: ReferenceCatalog, *, city: str, meal: str
 ) -> MealReference | None:

@@ -1,5 +1,6 @@
 import { STAGE_MAP, TOTAL_STAGES } from "@/constants/stages";
 import type { StageCode } from "@/types/trip";
+import { CircleAlert, Check } from "lucide-react";
 
 interface ProgressTimelineProps {
   currentCode: StageCode | null;
@@ -53,11 +54,11 @@ export function ProgressTimeline({ currentCode, failed }: ProgressTimelineProps)
                 <div className="absolute -left-10 top-0 flex items-center justify-center">
                   {isFailed ? (
                     <span className="flex h-7 w-7 items-center justify-center rounded-full bg-red-500 text-white shadow-[0_0_12px_rgba(239,68,68,0.45)] ring-4 ring-red-100 animate-pulse">
-                      <i className="fa-solid fa-exclamation text-[11px]" aria-hidden="true" />
+                      <CircleAlert size={11} aria-hidden="true" />
                     </span>
                   ) : isDone ? (
                     <span className="flex h-7 w-7 items-center justify-center rounded-full bg-white/90 border border-emerald-500/40 text-emerald-600 shadow-[0_2px_8px_rgba(16,185,129,0.15)] backdrop-blur-xs transition-transform duration-300 group-hover:scale-110">
-                      <i className="fa-solid fa-check text-[10px] text-emerald-600" aria-hidden="true" />
+                      <Check size={10} className="text-emerald-600" aria-hidden="true" />
                     </span>
                   ) : isActive ? (
                     <div className="relative flex h-7 w-7 items-center justify-center">

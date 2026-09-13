@@ -3,6 +3,7 @@ import { createBrowserRouter } from "react-router-dom";
 import { lazy, Suspense } from "react";
 import App from "./App";
 
+const CinematicHomepagePage = lazy(() => import("./pages/demo/CinematicHomepagePage"));
 const InputPage = lazy(() => import("./pages/InputPage"));
 const PlanningPage = lazy(() => import("./pages/PlanningPage"));
 const ResultPage = lazy(() => import("./pages/ResultPage"));
@@ -83,7 +84,23 @@ export const router = createBrowserRouter([
         index: true,
         element: (
           <LazyPage>
+            <CinematicHomepagePage />
+          </LazyPage>
+        ),
+      },
+      {
+        path: "classic",
+        element: (
+          <LazyPage>
             <InputPage />
+          </LazyPage>
+        ),
+      },
+      {
+        path: "cinematic",
+        element: (
+          <LazyPage>
+            <CinematicHomepagePage />
           </LazyPage>
         ),
       },

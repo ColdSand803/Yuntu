@@ -231,6 +231,8 @@ def normalize_plan_places(
                 budget_result=plan.budget_result,
                 accommodation=plan.accommodation,
                 transport=plan.transport,
+                packing_checklist=plan.packing_checklist,
+                travel_tips=plan.travel_tips,
                 poi_fragments=plan.poi_fragments,
             ))
             continue
@@ -271,6 +273,8 @@ def normalize_plan_places(
             budget_result=plan.budget_result,
             accommodation=plan.accommodation,
             transport=plan.transport,
+            packing_checklist=plan.packing_checklist,
+            travel_tips=plan.travel_tips,
             poi_fragments=plan.poi_fragments,
         ))
     return normalized

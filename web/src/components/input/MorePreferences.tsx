@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchHotPlaces, type HotPlace } from "@/services/api";
 import type { RequestedCommuteMode, MustIncludeItem } from "@/types/form";
+import { ChevronDown } from "lucide-react";
 
 interface MorePreferencesProps {
   city: string;
@@ -368,8 +369,9 @@ export function MorePreferences({
             )
           )}
         </span>
-        <i
-          className={`fas fa-chevron-down text-xs text-gray-400 transition-transform ${open ? "rotate-180" : ""}`}
+        <ChevronDown
+          size={12}
+          className={`text-gray-400 transition-transform ${open ? "rotate-180" : ""}`}
           aria-hidden="true"
         />
       </button>

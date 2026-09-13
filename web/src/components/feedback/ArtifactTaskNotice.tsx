@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { useShareImageTaskStore, StoredTask } from "@/stores/shareImageTaskStore";
+import { Sparkles, CircleAlert, X, ArrowRight } from "lucide-react";
 
 export function ArtifactTaskNotice() {
   const navigate = useNavigate();
@@ -26,7 +27,7 @@ export function ArtifactTaskNotice() {
   const handleAction = () => {
     acknowledgeTask(activeTask.recordId);
     if (!activeTask.jobId) {
-      navigate("/");
+      navigate("/history");
       return;
     }
     const encodedJobId = encodeURIComponent(activeTask.jobId);
@@ -63,10 +64,11 @@ export function ArtifactTaskNotice() {
                   : "bg-red-50 text-red-600 ring-1 ring-red-200/50"
               }`}
             >
-              <i
-                className={`fa-solid ${isReady ? "fa-sparkles" : "fa-circle-exclamation"} text-lg`}
-                aria-hidden="true"
-              />
+              {isReady ? (
+                <Sparkles size={18} aria-hidden="true" />
+              ) : (
+                <CircleAlert size={18} aria-hidden="true" />
+              )}
             </div>
 
             <div className="min-w-0">
@@ -85,7 +87,7 @@ export function ArtifactTaskNotice() {
             aria-label="关闭"
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gray-50 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-300"
           >
-            <i className="fa-solid fa-xmark text-sm" aria-hidden="true" />
+            <X size={14} aria-hidden="true" />
           </button>
         </div>
 
@@ -111,7 +113,7 @@ export function ArtifactTaskNotice() {
             {isReady ? (
               <>
                 <span>查看长图</span>
-                <i className="fa-solid fa-arrow-right text-[10px]" aria-hidden="true" />
+                <ArrowRight size={10} aria-hidden="true" />
               </>
             ) : (
               <span>查看行程</span>

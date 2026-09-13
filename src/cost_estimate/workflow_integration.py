@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+
+from src.agents.pace import generation_base_mode
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -13,11 +16,13 @@ from src.agents.schema import RoutePlan, TripRequest, WorkflowResult
 from src.agents.schema import TransportSuggestion
 from src.agents.food_resolver import FoodAttachment
 from src.cost_reference.catalog import load_reference_catalog
+from src.cost_reference.catalog import lookup_admission_by_label
 from src.cost_reference.models import ReferenceCatalog
 from src.cost_sources.accommodation import resolve_accommodation_source
 from src.cost_sources.intercity import IntercitySourceBundle, observe_intercity_sources
 from src.cost_sources.local_transport import resolve_local_transport_source
 from src.cost_sources.meals import resolve_meal_source
+from src.cost_sources.admission import resolve_admission_source
 from src.cost_sources.models import CostSourceResult
 from src.config import get_settings
 
@@ -306,6 +311,27 @@ async def _plan_inputs(
                 source=selected,
             ))
 
+        if route_plan.route_policy_version == "selector-route-v2":
+            for access in day_group.access_legs:
+                anchor_key = hashlib.sha256(f"{access.anchor_latitude},{access.anchor_longitude}".encode()).hexdigest()
+                identity = (f"route:plan:{plan_index}:day:{day_group.day}:access:{access.direction}:"
+                            f"{access.place_id}:{access.mode}:{anchor_key}")
+                source = resolve_local_transport_source(
+                    catalog, city=city, effective_mode=access.mode,
+                    requested_commute_mode=request.commute_mode,
+                    provider_result=_missing_source("accommodation access has no verified fare observation"),
+                    captured_at=estimated_at,
+                )
+                local_transport.append(LocalTransportCostInput(route_identity=identity, effective_mode=access.mode, source=source))
+            if not day_group.access_legs:
+                # The omitted journey is missing coverage, not two free or priced rides.
+                mode, _ = generation_base_mode(request, get_settings())
+                local_transport.append(LocalTransportCostInput(
+                    route_identity=f"route:plan:{plan_index}:day:{day_group.day}:access:unknown",
+                    effective_mode=mode,
+                    source=_missing_source("accommodation access location and fare are unknown"),
+                ))
+
     unique_places = {
         place.place_id: place
         for day_group in route_plan.day_groups
@@ -316,10 +342,25 @@ async def _plan_inputs(
         place = unique_places[place_id]
         if place.place_type.lower() not in ADMISSION_PLACE_TYPES:
             continue
+        identity = f"canonical-place:{place.place_id}"
+        # Try catalog lookup by place name + city
+        ref = lookup_admission_by_label(
+            catalog, place_label=place.name, city=city,
+        )
+        if ref is not None:
+            source = resolve_admission_source(
+                catalog,
+                place_identity=ref.place_identity,
+                captured_at=estimated_at,
+            )
+        else:
+            source = _missing_source(
+                f"no catalog entry for {place.name} in {city}"
+            )
         admissions.append(AdmissionCostInput(
-            place_identity=f"canonical-place:{place.place_id}",
+            place_identity=identity,
             charging_basis="person_entry",
-            source=_missing_source("stable admission identity is unavailable"),
+            source=source,
         ))
 
     meals = tuple(

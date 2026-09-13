@@ -594,6 +594,8 @@ class SpeculativeWriterExecutor(Generic[DraftT]):
 
                     if (
                         opus_result.state is OpusAdjudicationState.INVALID
+                        and opus_result.failure_type
+                        != "writer_excessive_keyed_fragment_fallback"
                         and not opus_retry_used
                         and self._retry_admitted()
                     ):

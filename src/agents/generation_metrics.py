@@ -50,6 +50,30 @@ class GenerationMetrics:
     writer_keyed_fragment_invalid_details: list[dict[str, Any]] = field(
         default_factory=list
     )
+    writer_keyed_fragment_repair_attempted: bool = False
+    writer_keyed_fragment_repair_target_count: int = 0
+    writer_keyed_fragment_repair_applied_count: int = 0
+    writer_keyed_fragment_repair_remaining_count: int = 0
+    writer_keyed_fragment_repair_latency_ms: int = 0
+    writer_keyed_fragment_repair_failure_reason: str = ""
+    review_keyed_fragment_repair_attempted: bool = False
+    review_keyed_fragment_repair_target_count: int = 0
+    review_keyed_fragment_repair_applied_count: int = 0
+    review_keyed_fragment_repair_remaining_count: int = 0
+    review_keyed_fragment_repair_timeout_seconds: float = 0.0
+    review_keyed_fragment_repair_latency_ms: int = 0
+    review_keyed_fragment_repair_review_latency_ms: int = 0
+    review_keyed_fragment_repair_review_retry_count: int = 0
+    review_keyed_fragment_repair_failure_reason: str = ""
+    review_keyed_fragment_repair_failure_policy: str = ""
+    review_keyed_fragment_required_count: int = 0
+    post_review_ds_rescue_available: bool = False
+    post_review_ds_rescue_attempted: bool = False
+    post_review_ds_rescue_reason: str = ""
+    post_review_ds_rescue_succeeded: bool = False
+    post_review_ds_rescue_failure_reason: str = ""
+    post_review_ds_rescue_review_latency_ms: int = 0
+    post_review_ds_rescue_issue_counts: dict[str, int] = field(default_factory=dict)
     activity_local_completion_enabled: bool = False
     activity_local_completion_before_missing_count: int = 0
     activity_local_completion_attempted_count: int = 0

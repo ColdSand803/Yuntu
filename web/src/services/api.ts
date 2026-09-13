@@ -265,3 +265,6 @@ export async function fetchArtifactBlob(
   }
   return res.blob();
 }
+
+/* ---------- Destinations API ---------- */
+export { fetchDestinations } from "@/api/destinations";

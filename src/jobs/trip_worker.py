@@ -10,8 +10,13 @@ import time
 from src.agents.llm import (
     bind_observation_sink,
     chat,
+    current_llm_observation_summary,
     llm_call_context,
+    merge_llm_observation_summaries,
     pop_job_observation_flush,
+    project_persisted_llm_usage_for_stage,
+    start_llm_observation,
+    stop_llm_observation,
 )
 from src.agents.publish_gate import (
     PUBLISH_FAILURE_FALLBACK_MESSAGE,
@@ -32,6 +37,7 @@ from src.jobs.trip_store import (
     claim_next_pending_trip_job,
     close_running_trip_job_steps,
     ensure_terminal_observation_step,
+    enrich_latest_trip_job_step_observation,
     expire_stale_trip_jobs,
     get_recent_successful_plan_place_ids,
     mark_trip_job_failed,
@@ -58,6 +64,7 @@ from src.jobs.trip_failed_draft import (
 )
 from src.agents.safe_plan_renderer import SafeRenderError
 from src.agents.writer_relay_router import WriterRelayError
+from src.agents.dispatch_resolver import STRUCTURAL_INCOMPLETE_REASONS
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +75,43 @@ CITY_CLARIFICATION_FALLBACK_MESSAGE = (
     "可以直接发“成都3天美食”或“福州3天想去平潭”，"
     "我再继续帮你规划。"
 )
+
+_SAFE_FAILURE_REASON_CODES = frozenset({
+    "activity_content_missing", "ambiguous_alias", "blueprint_integrity_violation",
+    "blueprint_theme_weak_match", "budget_infeasible",
+    "budget_overrun_without_exception", "city_mismatch", "commute_prose_violation",
+    "cross_day_poi", "database_tone", "day_place_names_mismatch",
+    "declared_day_count_mismatch", "declared_locked_day_group_violation",
+    "duplicate_day_heading", "empty_day", "empty_plan_text",
+    "food_none_tier_violation", "food_source_attribution", "food_tier_exceeded",
+    "fragment_registry_invalidated", "generic_copy_quality_warn",
+    "invariant_commute_legs", "invariant_place_merge", "invariant_route_signature",
+    "missing_day", "missing_route_plan", "outline_only", "placeholder_wording",
+    "plan_count_mismatch", "plan_similarity_warn", "plan_text_missing_locked_stop",
+    "rare_character_compatibility", "repair_budget_exceeded",
+    "required_fact_fragment_repair_failed", "review_unavailable", "route_outside_poi",
+    "structurally_incomplete", "text_day_count_mismatch",
+    "text_locked_day_group_violation", "too_short_plan_text",
+    "transit_detail_in_prose", "transit_direction_invented",
+    "transit_line_not_allowed", "transit_stop_not_allowed", "transit_summary_altered",
+    "truncated_skeleton", "unclassified_failure", "unsupported_fact_expansion",
+    "unsupported_meal_role", "weak_evidence_data_gap",
+})
+_FAILURE_CATEGORIES = frozenset({
+    "PUBLISH_GATE_FAILED", "WRITER_CAPACITY_BUSY", "WRITER_ENDPOINTS_UNAVAILABLE",
+    "SAFE_RENDER_FAILED", "LLM_ERROR", "DB_ERROR", "WORKFLOW_ERROR", "TIMEOUT",
+    "CANCELLED",
+})
+_REWRITE_SKIP_REASONS = frozenset({
+    "NOT_APPLICABLE", "REASON_NOT_ELIGIBLE", "RETRY_ALREADY_EXHAUSTED",
+    "INSUFFICIENT_TIME_BUDGET", "SAFE_OR_LOCAL_RECOVERY_SELECTED",
+    "WRITER_FAILED_BEFORE_DRAFT", "UNKNOWN_FROM_HISTORICAL_EVIDENCE",
+})
+_LOCAL_RECOVERY_FAILURE_REASONS = frozenset({
+    "fragment_registry_invalidated",
+    "repair_budget_exceeded",
+    "required_fact_fragment_repair_failed",
+})
 
 
 def _elapsed_ms(start: float) -> int:
@@ -144,6 +188,84 @@ async def _polish_publish_failure_message(
     return message or PUBLISH_FAILURE_FALLBACK_MESSAGE
 
 
+async def _observe_terminal_polish(
+    action,
+    *,
+    prior_summary: dict,
+    stage: str,
+    attempt: int,
+    publish_retry_round: int,
+    job_id: str,
+    request_id: str | None,
+    fallback_result: str,
+) -> tuple[str, dict, dict, bool]:
+    """Observe a post-workflow polish call without changing its result policy."""
+    token, _ = start_llm_observation()
+    cancelled = False
+    try:
+        with llm_call_context(
+            job_id=job_id,
+            request_id=request_id,
+            stage=stage,
+            attempt=attempt,
+            publish_retry_round=publish_retry_round,
+            owning_stage=stage,
+            owning_attempt=attempt,
+            owning_publish_retry_round=publish_retry_round,
+        ):
+            try:
+                result = await action()
+            except asyncio.CancelledError:
+                # Terminal persistence is authoritative. A best-effort copy
+                # polish must not turn FAILED/REJECTED into a missing outcome.
+                logger.warning(
+                    "terminal polish cancelled; using fallback job_id=%s stage=%s",
+                    job_id,
+                    stage,
+                )
+                result = fallback_result
+                cancelled = True
+        polish_summary = current_llm_observation_summary()
+    finally:
+        stop_llm_observation(token)
+    combined = merge_llm_observation_summaries(prior_summary, polish_summary)
+    usage = project_persisted_llm_usage_for_stage(
+        combined,
+        stage=stage,
+        attempt=attempt,
+        publish_retry_round=publish_retry_round,
+    )
+    return result, combined, usage, cancelled
+
+
+async def _enrich_terminal_polish_observation(
+    job_id: str,
+    *,
+    stage: str,
+    attempt: int,
+    publish_retry_round: int,
+    summary: dict,
+    usage: dict,
+) -> bool:
+    """Persist auxiliary polish evidence without changing terminal handling."""
+    try:
+        return await enrich_latest_trip_job_step_observation(
+            job_id,
+            stage=stage,
+            attempt=attempt,
+            publish_retry_round=publish_retry_round,
+            metadata={"llm_observation": summary, "llm_usage": usage},
+        )
+    except Exception:
+        logger.warning(
+            "terminal polish observation persistence failed job_id=%s stage=%s",
+            job_id,
+            stage,
+            exc_info=True,
+        )
+        return False
+
+
 def _city_gate_rejection_metadata(decision: CityGateDecision) -> dict[str, str]:
     metadata: dict[str, str] = {
         "city_gate_status": decision.status,
@@ -213,6 +335,112 @@ def _classify_error(exc: Exception) -> tuple[str, str]:
     if "database" in lowered or "sql" in lowered or "asyncpg" in lowered:
         return "DB_ERROR", "规划失败，请稍后重试"
     return "WORKFLOW_ERROR", "规划失败，请稍后重试"
+
+
+def _build_failure_observation(
+    exc: Exception,
+    *,
+    stage: str | None,
+    error_code: str,
+    completed_rewrite_rounds: int = 0,
+    failed_draft_available: bool = False,
+) -> dict[str, object]:
+    resolved_stage = stage or "WORKFLOW"
+    category = error_code if error_code in _FAILURE_CATEGORIES else "WORKFLOW_ERROR"
+    raw_findings = []
+    if isinstance(exc, PublishGateError):
+        raw_findings = list(exc.result.blocking_findings)
+    reason_facts: dict[str, dict[str, object]] = {}
+    for finding in raw_findings:
+        internal = str(getattr(finding, "reason", "") or "").strip()
+        code = internal if internal in _SAFE_FAILURE_REASON_CODES else "unclassified_failure"
+        fact = reason_facts.setdefault(code, {
+            "code": code,
+            "count": 0,
+            "plan_indexes": [],
+        })
+        fact["count"] = int(fact["count"]) + 1
+        plan_index = getattr(finding, "plan_index", None)
+        if (
+            isinstance(plan_index, int)
+            and not isinstance(plan_index, bool)
+            and plan_index > 0
+            and plan_index not in fact["plan_indexes"]
+            and len(fact["plan_indexes"]) < 20
+        ):
+            fact["plan_indexes"].append(plan_index)
+
+    explicit_indexes = getattr(exc, "trace_truth_reason_plan_indexes", None)
+    if isinstance(explicit_indexes, dict):
+        for internal, indexes in explicit_indexes.items():
+            if not isinstance(indexes, list):
+                continue
+            internal_code = str(internal or "").strip()
+            code = (
+                internal_code
+                if internal_code in _SAFE_FAILURE_REASON_CODES
+                else "unclassified_failure"
+            )
+            fact = reason_facts.get(code)
+            if fact is None:
+                continue
+            for plan_index in indexes:
+                if (
+                    isinstance(plan_index, int)
+                    and not isinstance(plan_index, bool)
+                    and plan_index > 0
+                    and plan_index not in fact["plan_indexes"]
+                    and len(fact["plan_indexes"]) < 20
+                ):
+                    fact["plan_indexes"].append(plan_index)
+
+    completed_rounds = 1 if int(completed_rewrite_rounds or 0) > 0 else 0
+    attempted = completed_rounds == 1
+    raw_codes = {
+        str(getattr(finding, "reason", "") or "").strip()
+        for finding in raw_findings
+        if str(getattr(finding, "reason", "") or "").strip()
+    }
+    eligible = attempted or (
+        isinstance(exc, PublishGateError)
+        and bool(raw_codes)
+        and raw_codes.issubset(STRUCTURAL_INCOMPLETE_REASONS)
+    )
+    skip_reason = getattr(exc, "trace_truth_retry_not_attempted_reason", None)
+    if skip_reason not in _REWRITE_SKIP_REASONS:
+        skip_reason = None
+    explicit_eligible = getattr(exc, "trace_truth_retry_eligible", None)
+    if isinstance(explicit_eligible, bool) and not attempted:
+        eligible = explicit_eligible
+    if attempted:
+        skip_reason = None
+    elif skip_reason is None:
+        if getattr(exc, "trace_truth_local_recovery_attempted", None) is True:
+            skip_reason = "SAFE_OR_LOCAL_RECOVERY_SELECTED"
+        elif eligible:
+            skip_reason = "INSUFFICIENT_TIME_BUDGET"
+        elif resolved_stage == "FINAL_WRITER" and not failed_draft_available:
+            skip_reason = "WRITER_FAILED_BEFORE_DRAFT"
+        elif raw_codes.intersection(_LOCAL_RECOVERY_FAILURE_REASONS):
+            skip_reason = "SAFE_OR_LOCAL_RECOVERY_SELECTED"
+        elif isinstance(exc, PublishGateError):
+            skip_reason = "REASON_NOT_ELIGIBLE"
+        else:
+            skip_reason = "NOT_APPLICABLE"
+    return {
+        "schema_version": 1,
+        "evidence_state": "AVAILABLE",
+        "observation_revision": 1,
+        "failure_stage": resolved_stage[:120],
+        "category": category,
+        "reasons": list(reason_facts.values())[:50],
+        "automatic_rewrite": {
+            "eligible": bool(eligible),
+            "attempted": attempted,
+            "completed_rounds": completed_rounds,
+            "not_attempted_reason": skip_reason,
+        },
+    }
 
 
 def _structured_trip_request_from_job(job: TripJobRecord) -> TripRequest | None:
@@ -292,6 +520,10 @@ class TripWorker:
             runtime_metrics["queue_wait_ms"] = queue_wait_ms
         city_notice_code: str | None = None
         pending_current_stage: str | None = None
+        latest_workflow_stage: str | None = None
+        latest_workflow_attempt = 1
+        latest_workflow_publish_retry_round = 0
+        completed_automatic_rewrite_rounds = 0
         pending_success_event: dict | None = None
         structured_trip_request = _structured_trip_request_from_job(job)
         structured_pre_gate_done = False
@@ -325,20 +557,42 @@ class TripWorker:
                 )
 
         async def on_stage(stage: str) -> None:
-            nonlocal pending_current_stage
+            nonlocal pending_current_stage, latest_workflow_stage
             pending_current_stage = stage
+            latest_workflow_stage = stage
 
         async def flush_observation_writes() -> None:
             # P1 stage writes are awaited inline. Kept as a local compatibility
             # hook for the existing terminal flow and tests.
             return None
 
+        async def flush_pending_stage_success() -> None:
+            nonlocal pending_success_event
+            if pending_success_event is None:
+                return
+            previous = pending_success_event
+            pending_success_event = None
+            await record_trip_job_step_event(
+                job_id,
+                stage=str(previous.get("stage") or ""),
+                status="SUCCESS",
+                attempt=int(previous.get("attempt") or 1),
+                publish_retry_round=int(
+                    previous.get("publish_retry_round") or 0
+                ),
+                latency_ms=previous.get("latency_ms"),
+                metadata=previous.get("metadata") or {},
+            )
+
         async def on_stage_event(
             stage: str,
             status: str,
             metadata: dict,
         ) -> None:
-            nonlocal pending_current_stage, pending_success_event
+            nonlocal pending_current_stage, pending_success_event, latest_workflow_stage
+            nonlocal latest_workflow_attempt, latest_workflow_publish_retry_round
+            nonlocal completed_automatic_rewrite_rounds
+            latest_workflow_stage = stage
             event_metadata = dict(metadata)
             if stage == "PERSISTING" and status in {"SUCCESS", "FAILED"}:
                 event_metadata.update(runtime_metrics)
@@ -346,6 +600,13 @@ class TripWorker:
             publish_retry_round = int(
                 event_metadata.get("publish_retry_round") or 0
             )
+            latest_workflow_attempt = attempt
+            latest_workflow_publish_retry_round = publish_retry_round
+            if stage == "PUBLISH_RETRY" and status == "SUCCESS":
+                completed_automatic_rewrite_rounds = max(
+                    completed_automatic_rewrite_rounds,
+                    min(1, publish_retry_round),
+                )
             if status == "SUCCESS" and stage != "PERSISTING":
                 pending_success_event = {
                     "stage": stage,
@@ -373,19 +634,7 @@ class TripWorker:
                 )
                 return
             if pending_success_event is not None:
-                previous = pending_success_event
-                pending_success_event = None
-                await record_trip_job_step_event(
-                    job_id,
-                    stage=str(previous.get("stage") or ""),
-                    status="SUCCESS",
-                    attempt=int(previous.get("attempt") or 1),
-                    publish_retry_round=int(
-                        previous.get("publish_retry_round") or 0
-                    ),
-                    latency_ms=previous.get("latency_ms"),
-                    metadata=previous.get("metadata") or {},
-                )
+                await flush_pending_stage_success()
             if status == "RUNNING":
                 await record_trip_job_step_event(
                     job_id,
@@ -572,22 +821,11 @@ class TripWorker:
                 )
             if pending_success_event is not None:
                 await flush_observation_writes()
-                previous = pending_success_event
-                pending_success_event = None
-                await record_trip_job_step_event(
-                    job_id,
-                    stage=str(previous.get("stage") or ""),
-                    status="SUCCESS",
-                    attempt=int(previous.get("attempt") or 1),
-                    publish_retry_round=int(
-                        previous.get("publish_retry_round") or 0
-                    ),
-                    latency_ms=previous.get("latency_ms"),
-                    metadata=previous.get("metadata") or {},
-                )
+                await flush_pending_stage_success()
         except asyncio.TimeoutError:
             logger.warning("trip worker timeout job_id=%s", job_id)
             await flush_observation_writes()
+            await flush_pending_stage_success()
             flushed = pop_job_observation_flush(job_id) or {}
             summary_blob = {
                 "llm_call_count_total": int(flushed.get("llm_call_count_total") or 0),
@@ -600,6 +838,14 @@ class TripWorker:
                 "error": "trip worker timeout",
                 "llm_observation": flushed or None,
             }
+            timeout_error = asyncio.TimeoutError("trip worker timeout")
+            observation_meta["failure_observation"] = _build_failure_observation(
+                timeout_error,
+                stage=latest_workflow_stage,
+                error_code="TIMEOUT",
+                completed_rewrite_rounds=completed_automatic_rewrite_rounds,
+                failed_draft_available=bool(failed_draft_snapshot),
+            )
             await mark_trip_job_timeout(
                 job_id,
                 error_detail=detail,
@@ -611,6 +857,7 @@ class TripWorker:
         except asyncio.CancelledError:
             logger.warning("trip worker cancelled job_id=%s", job_id)
             await flush_observation_writes()
+            await flush_pending_stage_success()
             flushed = pop_job_observation_flush(job_id) or {}
             summary_blob = {
                 "llm_call_count_total": int(flushed.get("llm_call_count_total") or 0),
@@ -623,6 +870,14 @@ class TripWorker:
                 "error": "trip worker cancelled",
                 "llm_observation": flushed or None,
             }
+            cancelled_error = RuntimeError("trip worker cancelled")
+            observation_meta["failure_observation"] = _build_failure_observation(
+                cancelled_error,
+                stage=latest_workflow_stage,
+                error_code="CANCELLED",
+                completed_rewrite_rounds=completed_automatic_rewrite_rounds,
+                failed_draft_available=bool(failed_draft_snapshot),
+            )
             await mark_trip_job_failed(
                 job_id,
                 error_code="CANCELLED",
@@ -640,20 +895,47 @@ class TripWorker:
                 exc.decision.status,
             )
             # Always drop job-owned sink on non-success exits too.
-            pop_job_observation_flush(job_id)
+            flushed = pop_job_observation_flush(job_id) or {}
             await flush_observation_writes()
+            await flush_pending_stage_success()
             if exc.decision.status == CITY_CLARIFICATION_REQUIRED:
-                message = await _polish_city_clarification_message(
-                    job.user_query,
-                    deadline_monotonic=workflow_deadline_monotonic,
+                owning_stage = latest_workflow_stage or "INTENT_PARSER"
+                message, flushed, usage, polish_cancelled = await _observe_terminal_polish(
+                    lambda: _polish_city_clarification_message(
+                        job.user_query,
+                        deadline_monotonic=workflow_deadline_monotonic,
+                        job_id=job_id,
+                        request_id=job.request_id,
+                    ),
+                    prior_summary=flushed,
+                    stage=owning_stage,
+                    attempt=latest_workflow_attempt,
+                    publish_retry_round=latest_workflow_publish_retry_round,
                     job_id=job_id,
                     request_id=job.request_id,
+                    fallback_result=CITY_CLARIFICATION_FALLBACK_MESSAGE,
+                )
+                enriched = await _enrich_terminal_polish_observation(
+                    job_id,
+                    stage=owning_stage,
+                    attempt=latest_workflow_attempt,
+                    publish_retry_round=latest_workflow_publish_retry_round,
+                    summary=flushed,
+                    usage=usage,
                 )
                 await mark_trip_job_rejected_with_message(
                     job_id,
                     error_code=exc.decision.status,
                     error_message=message,
+                    step_metadata=(
+                        None
+                        if enriched
+                        else {"llm_observation": flushed, "llm_usage": usage}
+                    ),
+                    ensure_terminal_evidence=not enriched,
                 )
+                if polish_cancelled:
+                    raise asyncio.CancelledError
             else:
                 await mark_trip_job_rejected(
                     job_id,
@@ -663,6 +945,7 @@ class TripWorker:
         except Exception as exc:
             logger.exception("trip worker failed job_id=%s", job_id)
             await flush_observation_writes()
+            await flush_pending_stage_success()
             flushed = pop_job_observation_flush(job_id) or {}
             summary_blob = {
                 "error_type": type(exc).__name__,
@@ -677,7 +960,6 @@ class TripWorker:
                     flushed.get("llm_response_received_count")
                 ),
             }
-            detail = json.dumps(summary_blob, ensure_ascii=False)
             observation_meta = {
                 "error": str(exc),
                 "llm_observation": flushed or None,
@@ -698,13 +980,59 @@ class TripWorker:
                     ],
                 }
             error_code, error_message = _classify_error(exc)
+            failure_observation = _build_failure_observation(
+                exc,
+                stage=latest_workflow_stage,
+                error_code=error_code,
+                completed_rewrite_rounds=completed_automatic_rewrite_rounds,
+                failed_draft_available=bool(failed_draft_snapshot),
+            )
+            summary_blob["failure_observation"] = failure_observation
+            detail = json.dumps(summary_blob, ensure_ascii=False)
+            observation_meta["failure_observation"] = failure_observation
+            polish_cancelled = False
             if isinstance(exc, PublishGateError):
-                error_message = await _polish_publish_failure_message(
-                    exc,
-                    deadline_monotonic=workflow_deadline_monotonic,
+                observation_meta["error"] = error_code
+                owning_stage = latest_workflow_stage or "PUBLISH_GATE"
+                (
+                    error_message,
+                    flushed,
+                    usage,
+                    polish_cancelled,
+                ) = await _observe_terminal_polish(
+                    lambda: _polish_publish_failure_message(
+                        exc,
+                        deadline_monotonic=workflow_deadline_monotonic,
+                        job_id=job_id,
+                        request_id=job.request_id,
+                    ),
+                    prior_summary=flushed,
+                    stage=owning_stage,
+                    attempt=latest_workflow_attempt,
+                    publish_retry_round=latest_workflow_publish_retry_round,
                     job_id=job_id,
                     request_id=job.request_id,
+                    fallback_result=PUBLISH_FAILURE_FALLBACK_MESSAGE,
                 )
+                observation_meta["llm_observation"] = flushed
+                await _enrich_terminal_polish_observation(
+                    job_id,
+                    stage=owning_stage,
+                    attempt=latest_workflow_attempt,
+                    publish_retry_round=latest_workflow_publish_retry_round,
+                    summary=flushed,
+                    usage=usage,
+                )
+                summary_blob["llm_call_count_total"] = int(
+                    flushed.get("llm_call_count_total") or 0
+                )
+                summary_blob["llm_error_count_total"] = int(
+                    flushed.get("llm_error_count_total") or 0
+                )
+                summary_blob["response_received"] = bool(
+                    flushed.get("llm_response_received_count")
+                )
+                detail = json.dumps(summary_blob, ensure_ascii=False)
             await mark_trip_job_failed(
                 job_id,
                 error_code=error_code,
@@ -714,6 +1042,8 @@ class TripWorker:
                 ensure_terminal_step=True,
             )
             await persist_captured_failed_draft()
+            if polish_cancelled:
+                raise asyncio.CancelledError
             return
 
         # Success path: clear job sink after workflow returns.
@@ -731,6 +1061,9 @@ class TripWorker:
                 result_record_id=result.record_id,
                 trip_request_json={
                     **result.trip_request.model_dump(),
+                    **({"route_failure_code": result.quality_metrics["accommodation_failure_code"]}
+                       if result.result_type == "NO_USABLE_ROUTE" and result.quality_metrics.get("accommodation_failure_code")
+                       in {"ACCOMMODATION_UNRESOLVED", "ROUTE_SEARCH_EXHAUSTED"} else {}),
                     **({"city_notice_code": city_notice_code} if city_notice_code else {}),
                 },
             )

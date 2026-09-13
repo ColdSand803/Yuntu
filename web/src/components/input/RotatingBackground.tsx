@@ -1,14 +1,13 @@
+import { useDestinations } from "@/hooks/useDestinations";
+import { cityPhotoSources } from '@/utils/cityPhotoSources';
 /* eslint-disable react-refresh/only-export-components */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BUNDLED_FALLBACK_IMAGE,
-  bundledCityImages,
   cityAssetPathname,
   resolveCityAssetVariant,
-  usesBundledCityAssets,
 } from '@/config/cityAssets';
 
-const FALLBACK_IMAGE = BUNDLED_FALLBACK_IMAGE;
+const FALLBACK_IMAGE = '/city-placeholder.svg';
 const ROTATE_INTERVAL_MS = 15000;
 const FADE_MS = 500;
 const LOAD_TIMEOUT_MS = 8000;
@@ -215,9 +214,6 @@ const FOLDER_TO_CITY_NAME: Record<string, string> = {
   sanya: '三亚',
 };
 
-const ALL_IMAGES = Object.entries(CITY_IMAGES).flatMap(([folder, files]) =>
-  files.map((f) => `/city/${folder}/${f}`)
-);
 
 let isWebpSupported = true;
 try {
@@ -230,14 +226,6 @@ try {
 }
 
 export function resolveOptimalUrl(url: string): string {
-  if (usesBundledCityAssets()) {
-    const folder = cityAssetPathname(url)?.match(/^\/city(?:-opt)?\/([^/]+)\//)?.[1];
-    if (folder && bundledCityImages(folder)[0] !== BUNDLED_FALLBACK_IMAGE) {
-      return bundledCityImages(folder)[0];
-    }
-    if (folder === 'chongqing') return BUNDLED_FALLBACK_IMAGE;
-    return FALLBACK_IMAGE;
-  }
   // 根据当前视口宽度决定是否使用移动端小图
   const isMobile = window.matchMedia?.('(max-width: 768px)')?.matches ?? false;
   return resolveCityAssetVariant(url, {
@@ -246,54 +234,23 @@ export function resolveOptimalUrl(url: string): string {
   });
 }
 
-function shuffle<T>(arr: T[]): T[] {
-  const result = [...arr];
-  for (let i = result.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [result[i], result[j]] = [result[j], result[i]];
-  }
-  return result;
-}
-
 /** 取某城本地风景图 URL（明信片/等待页等共用） */
 export function getCityPhotoUrls(city: string, count = 4): string[] {
   const folder = CITY_NAME_TO_FOLDER[city];
-  if (usesBundledCityAssets()) {
-    const urls = folder ? bundledCityImages(folder) : [FALLBACK_IMAGE];
-    return urls.slice(0, count);
-  }
   if (folder && CITY_IMAGES[folder]?.length) {
     return CITY_IMAGES[folder].slice(0, count).map((f) => resolveOptimalUrl(`/city/${folder}/${f}`));
   }
-  return ALL_IMAGES.slice(0, count).map(resolveOptimalUrl);
-}
-
-function resolveCityPool(cities: string[]): string[] {
-  return cities.flatMap((city) => {
-    const entry = Object.entries(CITY_NAME_TO_FOLDER).find(
-      ([name, folder]) =>
-        city.includes(name) || city.toLowerCase().includes(folder)
-    );
-    if (!entry) return [];
-    const folder = entry[1];
-    if (usesBundledCityAssets()) {
-      return bundledCityImages(folder);
-    }
-    return CITY_IMAGES[folder].map((f) => resolveOptimalUrl(`/city/${folder}/${f}`));
-  });
+  return Array.from({ length: count }, () => FALLBACK_IMAGE);
 }
 
 export function cityNameOfImage(url: string): string | null {
-  const bundled = cityAssetPathname(url)?.match(/\/bundled\/([^/.]+)\./);
-  if (bundled) return FOLDER_TO_CITY_NAME[bundled[1]] ?? null;
   const match = cityAssetPathname(url)?.match(/^\/city(?:-opt)?\/([^/]+)\//);
   return match ? (FOLDER_TO_CITY_NAME[match[1]] ?? null) : null;
 }
 
 /**
  * 取某城市的图片列表（用于给方案卡配图）。
- * 命中城市 → 返回该城市图；未命中（如桂林等暂无素材的城市）→ 返回全部城市图，
- * 并按城市名做确定性轮转，让多张卡片取到不同的国内风景图，且同城每次顺序稳定（不闪烁）。
+ * 旧演示页使用；未配置城市返回中性占位图。生产页面读取 BFF 目录图片。
  */
 export function cityImageList(city: string): string[] {
   const entry = Object.entries(CITY_NAME_TO_FOLDER).find(
@@ -301,25 +258,26 @@ export function cityImageList(city: string): string[] {
   );
   if (entry) {
     const folder = entry[1];
-    if (usesBundledCityAssets()) {
-      return bundledCityImages(folder);
-    }
     return CITY_IMAGES[folder].map((f) => resolveOptimalUrl(`/city/${folder}/${f}`));
   }
-  // 未命中：用城市名生成确定性偏移，轮转全部图，保证稳定且不全是同一张
-  const seed = Array.from(city).reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
-  const offset = seed % ALL_IMAGES.length;
-  return [...ALL_IMAGES.slice(offset), ...ALL_IMAGES.slice(0, offset)].map(resolveOptimalUrl);
+  return [FALLBACK_IMAGE];
 }
 
 export function useRotatingBackground(cities: string[], fallbackMode: 'shuffle' | 'static' = 'shuffle') {
+  const { data } = useDestinations();
+  const cityKey = JSON.stringify(cities);
   const pool = useMemo(() => {
-    const cityPool = resolveCityPool(cities);
-    if (cityPool.length > 0) return cityPool;
-    if (fallbackMode === 'static') return [FALLBACK_IMAGE];
-    return shuffle([FALLBACK_IMAGE, ...ALL_IMAGES.map(resolveOptimalUrl)]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cities.join('|'), fallbackMode]);
+    const requestedCities: string[] = JSON.parse(cityKey);
+    // Prefetch a directory photo while the form waits for fresh availability.
+    // This is decorative only; it must not restore an unverified destination.
+    const selectedCities = requestedCities.some(Boolean) || fallbackMode === 'static' ? requestedCities
+      : [data?.destinations.find(item => item.isActive !== false)?.name ?? ''];
+    const photos = selectedCities.flatMap(city => {
+      const d = data?.destinations.find(item => item.name === city);
+      return cityPhotoSources(city, d).filter(url => url !== FALLBACK_IMAGE);
+    });
+    return photos.length ? [...new Set(photos)] : [FALLBACK_IMAGE];
+  }, [cityKey, data, fallbackMode]);
 
   const [current, setCurrent] = useState(FALLBACK_IMAGE);
   const [incoming, setIncoming] = useState<string | null>(null);
@@ -327,18 +285,8 @@ export function useRotatingBackground(cities: string[], fallbackMode: 'shuffle' 
   currentRef.current = current;
 
   useEffect(() => {
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      // 减少动态模式下不轮换，仅在城市图池变化时换一次
-      if (!pool.includes(currentRef.current)) {
-        const url = pool[0];
-        const img = new Image();
-        img.onload = () => setCurrent(url);
-        img.onerror = () => { /* 减少动态模式下静默忽略 */ };
-        img.src = url;
-      }
-      return;
-    }
-
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    setIncoming(null);
     let cancelled = false;
     let idx = 0;
     let activeImg: HTMLImageElement | null = null;
@@ -383,7 +331,8 @@ export function useRotatingBackground(cities: string[], fallbackMode: 'shuffle' 
       img.onload = () => {
         if (!cancelled && img === activeImg) {
           consecutiveErrors = 0;
-          setIncoming(targetUrl);
+          if (reducedMotion) setCurrent(targetUrl);
+          else setIncoming(targetUrl);
         }
         cleanupLoad();
       };
@@ -409,24 +358,24 @@ export function useRotatingBackground(cities: string[], fallbackMode: 'shuffle' 
     // 城市切换后当前图不在池中时，立即换一张
     if (!pool.includes(currentRef.current)) advance();
 
-    const timer = setInterval(advance, ROTATE_INTERVAL_MS);
+    const timer = reducedMotion ? null : setInterval(advance, ROTATE_INTERVAL_MS);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      if (timer) clearInterval(timer);
       cleanupLoad();
     };
   }, [pool]);
 
   useEffect(() => {
-    if (!incoming) return;
+    if (!incoming || !pool.includes(incoming)) return;
     const t = setTimeout(() => {
       setCurrent(incoming);
       setIncoming(null);
     }, FADE_MS);
     return () => clearTimeout(t);
-  }, [incoming]);
+  }, [incoming, pool]);
 
-  return { current, incoming };
+  return { current, incoming: incoming && pool.includes(incoming) ? incoming : null };
 }
 
 export function RotatingBackground({

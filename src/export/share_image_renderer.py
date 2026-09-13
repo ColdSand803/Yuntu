@@ -40,10 +40,7 @@ SHARE_IMAGE_OUTPUT_WIDTH = 1024
 SHARE_IMAGE_OUTPUT_MAX_HEIGHT = round(
     SHARE_IMAGE_LAYOUT_MAX_HEIGHT * SHARE_IMAGE_OUTPUT_WIDTH / SHARE_IMAGE_LAYOUT_WIDTH
 )
-from src.export.cost_estimate import (
-    cost_estimate_lines,
-    validate_artifact_cost_estimate,
-)
+from src.export.cost_estimate import validate_artifact_cost_estimate
 # Compatibility aliases describe the final artifact, not the internal fallback canvas.
 SHARE_IMAGE_WIDTH = SHARE_IMAGE_OUTPUT_WIDTH
 SHARE_IMAGE_MAX_HEIGHT = SHARE_IMAGE_OUTPUT_MAX_HEIGHT
@@ -130,21 +127,13 @@ def render_share_image_artifact(
 
     summary = build_share_summary(export_source)
     prompt_payload = build_share_image_prompt_payload(summary)
-    # A generated final-poster image cannot guarantee exact monetary text.
-    # Schema 2.0 cost artifacts therefore use the deterministic backend overlay
-    # and packaged city art even when an image provider is configured.
-    cost_integrity_mode = bool(summary.cost_lines)
+    # The share poster carries no monetary text, so a generated image cannot
+    # misstate an amount. Cost figures stay in the PDF and the web result.
     background_image, background_metadata = _background_from_ai_or_fallback(
         prompt_payload.prompt,
-        None if cost_integrity_mode else ai_background_client,
+        ai_background_client,
         summary.city,
     )
-    if cost_integrity_mode:
-        background_metadata = {
-            **background_metadata,
-            "cost_integrity_mode": "deterministic_overlay",
-            "ai_skipped_for_cost_integrity": ai_background_client is not None,
-        }
     is_generated = background_metadata["background_status"] == "generated"
     fonts: _Fonts | None = None
     if is_generated:
@@ -213,7 +202,6 @@ def render_share_image_artifact(
         "day_count": summary.days,
         "compression_mode": summary.compression_mode,
         "core_place_chip_count": len(summary.core_place_chips),
-        "cost_line_count": len(summary.cost_lines),
         "visible_script_char_count": prompt_payload.visible_script_char_count,
         "reference_context_char_count": prompt_payload.reference_context_char_count,
         "reference_context_truncated": prompt_payload.reference_context_truncated,
@@ -255,7 +243,6 @@ def build_share_summary(export_source: Any) -> ShareImageSummary:
     )
     core_place_chips = tuple(_core_place_chips(raw_days, days))
     people_count = _to_int(request.get("people_count"))
-    cost_lines = cost_estimate_lines(plan.get("cost_estimate"))
     return ShareImageSummary(
         city=_city_name(result),
         days=days,
@@ -267,7 +254,6 @@ def build_share_summary(export_source: Any) -> ShareImageSummary:
         core_place_chips=core_place_chips,
         suitable_for=_suitable_for(people_count, preferences, avoid, route_style),
         compression_mode=compression_mode,
-        cost_lines=cost_lines,
         notes=_user_facing_text(request.get("notes")),
         plan_title=_user_facing_text(plan.get("title")),
         plan_summary=_user_facing_text(plan.get("summary")),
@@ -296,7 +282,7 @@ def _validated_result(payload: dict[str, Any]) -> dict[str, Any]:
     result = payload.get("result")
     if not isinstance(result, dict):
         raise ShareImageRenderError("INVALID_EXPORT_SOURCE")
-    if result.get("schema_version") not in {"2.0", "2.1"}:
+    if result.get("schema_version") not in {"2.0", "2.1", "2.2"}:
         raise ShareImageRenderError("INVALID_EXPORT_SOURCE")
     if not isinstance(result.get("city"), dict):
         raise ShareImageRenderError("INVALID_EXPORT_SOURCE")
@@ -426,9 +412,7 @@ def _compose_fallback_poster(
         height = _measure_day_card_height(day, content_width, summary.compression_mode, fonts)
         day_rows.append((day, cursor_y, height))
         cursor_y += height + 22
-    cost_y = cursor_y + 34
-    cost_height = 92 + 40 * len(summary.cost_lines)
-    footer_y = cost_y + cost_height + 34
+    footer_y = cursor_y + 34
     final_height = min(max(1900, footer_y + 480), SHARE_IMAGE_LAYOUT_MAX_HEIGHT)
     canvas = _prepare_fallback_poster_base(background_image, final_height, day_rows)
     draw = ImageDraw.Draw(canvas, "RGBA")
@@ -436,15 +420,6 @@ def _compose_fallback_poster(
 
     _draw_header(draw, summary, fonts, tracker, margin, content_width)
     _draw_days(draw, summary, fonts, tracker, margin, content_width, day_rows)
-    _draw_cost_estimate(
-        draw,
-        summary,
-        fonts,
-        tracker,
-        margin,
-        cost_y,
-        content_width,
-    )
     footer_bottom = _draw_footer(
         draw,
         summary,
@@ -471,52 +446,9 @@ def _compose_fallback_poster(
             day_rows[-1][1] + day_rows[-1][2] if day_rows else 0
         ),
         "layout_footer_bottom_px": footer_bottom,
-        "layout_cost_line_count": len(summary.cost_lines),
         "background_composition": "fallback_deterministic_scrapbook",
         "backend_draw_operations": len(tracker.boxes),
     }
-
-
-def _draw_cost_estimate(
-    draw: ImageDraw.ImageDraw,
-    summary: ShareImageSummary,
-    fonts: _Fonts,
-    tracker: _TextBoxTracker,
-    x: int,
-    y: int,
-    width: int,
-) -> None:
-    _draw_paper_protection(
-        draw,
-        (x - 12, y - 10, x + width + 12, y + 82 + 40 * len(summary.cost_lines)),
-        alpha=190,
-    )
-    draw.line((x, y + 30, x + 28, y + 30), fill=(210, 91, 59, 240), width=8)
-    _draw_text(
-        draw,
-        "行程消费预估",
-        (x + 44, y + 8),
-        fonts.section,
-        "#172B46",
-        tracker,
-        "cost-heading",
-    )
-    line_y = y + 64
-    for index, line in enumerate(summary.cost_lines):
-        _draw_small_dot(draw, x + 8, line_y + 13, "#D96542")
-        _draw_wrapped_text(
-            draw,
-            line,
-            x + 28,
-            line_y,
-            width - 36,
-            fonts.small,
-            "#304058",
-            tracker,
-            f"cost-line-{index}",
-            max_lines=1,
-        )
-        line_y += 40
 
 
 def _draw_header(

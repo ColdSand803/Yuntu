@@ -21,7 +21,7 @@ from src.agents.evidence_strength import (
 from src.agents.food_review import FoodAttachmentAuthMap
 from src.agents.poi_alias import build_route_name_policy
 from src.agents.poi_fragments import fragment_registry_prompt
-from src.agents.llm import chat, llm_call_context
+from src.agents.llm import chat, llm_call_context, RoleConfig
 from src.agents.generation_issues import GenerationIssue
 from src.agents.route_planning import route_plan_violations
 from src.agents.schema import (
@@ -41,6 +41,9 @@ from src.agents.weather_advisory import (
 logger = logging.getLogger(__name__)
 
 ORDINARY_REVIEW_REQUEST_TIMEOUT_SECONDS = 40.0
+REVIEW_SCHEMA_REPAIR_TIMEOUT_SECONDS = 10.0
+REVIEW_MAX_TOKENS = 3000
+REVIEW_SCHEMA_REPAIR_MAX_TOKENS = 1200
 
 
 class ReviewSafetyError(RuntimeError):
@@ -63,10 +66,14 @@ class ReviewSafetyError(RuntimeError):
         self.invalid_output_type = invalid_output_type
 
 
-SYSTEM_PROMPT = """你是云途旅行规划服务的攻略质量审核助手。
-请审核生成的旅行攻略方案，检查是否存在地点编造、无来源事实扩写或路线脱节等问题。
+SYSTEM_PROMPT = """你是云途旅行规划服务 的语义质量审核员。
+你只负责收集语义类 issue taxonomy，不负责改写攻略正文。
 
-输出合法 JSON：
+你会收到：
+1. Structured Evidence Payload（每个地点的 deterministic 写作授权，不是原始 top_reasons/warnings）
+2. 生成的攻略方案列表
+
+请输出 JSON：
 {
   "issues": [
     {
@@ -74,21 +81,65 @@ SYSTEM_PROMPT = """你是云途旅行规划服务的攻略质量审核助手。
       "publish_action": "REPAIR_PLAN",
       "reason": "unsupported_fact_expansion",
       "plan_index": 1,
-      "day": 1,
+      "day": 2,
       "place_id": 123,
       "names": ["地点名"],
-      "snippet": "存在问题的正文片段",
-      "evidence": "问题原因说明"
+      "snippet": "正文片段",
+      "evidence": "候选证据只支持泛化描述，正文补了无来源细节",
+      "tags": ["DATA_GAP"],
+      "side_effects": ["DATA_BACKLOG"]
     }
   ],
   "overall_notes": "整体审核意见"
 }
 
-审核要点：
-1. 事实合规性：检查正文是否捏造未经验证的门票价格、具体营业时间或虚假地点。
-2. 路线一致性：确认正文与指定游览顺序保持一致。
-3. 餐饮与游览节奏：检查午餐/晚餐时段与主要打卡点的搭配是否合理。
-4. 语言质量：识别明显的空话套话或无意义复读。"""
+审核规则：
+1. 不输出 corrected_plan_text，不输出修正文案，不改写攻略。
+2. deterministic BLOCKER 不由你判断或降级；路线、城市、plan count、预算等硬错误由代码处理。
+3. 默认只给 REPAIR 或 WARN。只有 fabricated_city、fabricated_place、无法用具体 snippet 定位删除的 severe_fact_misleading 可以给 BLOCKER。
+4. DATA_GAP 只能放在 tags，必要时 side_effects 放 DATA_BACKLOG，不要把 DATA_GAP 当 category。
+5. 超出 Structured Evidence Payload 的无授权事实扩写、把餐厅/咖啡/小吃写成景点活动、long/remote transfer 表达误导，属于 REPAIR。
+6. “休息一下、简单休息、慢慢逛、顺路转场、坐下歇歇、作为茶歇/补给”等中性攻略叙事表达，
+   只有在 Structured Evidence Payload 的 weak_experience、锁定路线转场、地点类型或蓝图角色支持时才可视为安全；
+   基于地点类型的品类环境画面（街巷的石阶旧门面、滨江的江面江风、公园的绿意树荫、老厂房的梁柱层高）
+   视为地点类型天然支持，不属于 unsupported_fact_expansion；
+   但未授权的具体断言（具体年代、材质、菜品、香/好吃/新鲜等口味体验）仍属于 unsupported_fact_expansion。
+7. 文案一般、主题不够贴蓝图、两套方案风格相似但没有事实错误，属于 WARN。
+8. 弱证据、缺营业时间/菜品/口味/价格等数据侧缺口，属于 WARN + DATA_GAP + RECORD_ONLY + DATA_BACKLOG。
+9. 锁定路线中的“可信通勤参考”来自确定性路线计算，是可信系统事实；对应通勤分钟描述不属于无来源扩写。
+10. 如果提供了“行程组合蓝图”，只判断语义质量：每天主题导语、餐饮点角色、long_transfer/remote_transfer 提示、数据库口吻。
+11. warning/risk_only_warnings 只能作为条件风险提醒；如果正文把它写成推荐理由、体验卖点、路线依据、主题或亮点，输出 unsupported_fact_expansion。
+12. weak_experience 只能支持“整体/相对/适合/可以”等弱表达；如果升级成推荐/值得/很好/亮点/必去/宝藏，输出 unsupported_fact_expansion。
+13. not_authorized/omitted 不能作为正文素材；不要重新解释原始证据，也不要判断 classifier 是否正确。
+14. 主观负面体验判断、体验包装和决策式建议也需要授权；例如“没什么好拍的”“不太好拍”“轻松时光”“氛围感拉满”“经典拍照机位”“知名景点”“值得停留看看”“可以根据实际情况决定是否购票/买票/购买车票”“建议打车或坐车”“可自行权衡/到场再看”默认属于 unsupported_fact_expansion。
+15. Structured Evidence Payload 中 mandatory_mention_policy.mandatory_mention=true 的地点缺失于对应 Day 正文时，输出 unsupported_fact_expansion。mandatory_mention_policy.authorized_actions 是后端按蓝图角色确定的无事实动作边界：正文对这些动作的自然同义改写应视为已授权，但它绝不授权菜品、口味、价格、开放时间、历史年代、具体展品等可核验外部事实；地点类型的品类环境画面不在此限（见规则 6）。
+16. direct_facts 是地点已经授权的事实。只要正文没有新增数量、密度、空间分布或因果关系，对 direct_facts 的自然合并、同义改写不得判为 unsupported_fact_expansion。authorized_actions 只约束“做什么”，不得缩窄或否定 direct_facts 已授权的“有什么”。
+17. 提供 keyed POI fragments 时，POI issue 必须逐字回传对应的 plan_index/day/place_id；不得根据 names、snippet 或“这里”等指代重新猜测归属。未提供 fragment registry 的旧文本中，“这里、这条街、该街区”等指代才按同 Day 最近明确地点理解。
+18. “慢慢开始今天的行程、随后继续、作为当天收尾”等不包含外部事实的纯叙事连接语不属于 unsupported_fact_expansion。
+19. Weather Advisory Payload 是天气授权唯一来源；如果 status 不是 ok，正文不得出现任何天气句；如果 status 是 ok，只能使用 authorized_reminders，且必须写成 Day 级独立“天气提醒：...”行，不能进入 POI 理由、路线依据、标题、主题句、亮点或替代地点建议。
+20. Food Review 的 food_tier_exceeded、food_none_tier_violation、food_source_attribution 由 deterministic 检测拥有；不得根据主观判断改写或降级这些结果。
+21. reason 只能使用白名单：
+   unsupported_fact_expansion、food_place_written_as_attraction、
+   long_transfer_missing_or_misleading、blueprint_theme_weak_match、
+   weak_evidence_data_gap、generic_copy_quality_warn、plan_similarity_warn、
+   fabricated_city、fabricated_place、severe_fact_misleading、
+   weather_unauthorized_claim、weather_route_drift、weather_poi_bound_claim、
+   weather_disclaimer_leak、weather_format_violation、
+   food_tier_exceeded、food_none_tier_violation、food_source_attribution。
+22. 文案风格检查宽松原则：事实错误严格处理，文案表达宽松对待。
+   - 事实层（POI 名称、路线、价格、营业时间、交通分钟数、预约流程）：严格检查，无授权事实必须标记 unsupported_fact_expansion
+   - 路线可执行性（餐饮角色错误、transfer 误导、地点缺失）：严格检查，必须标记对应 reason
+   - 文案风格：只处理明显的空话、重复、廉价套话（"喝杯咖啡歇歇脚"连续出现 3 次以上、"慢慢逛"作为固定开头复读）
+   - 不得因为句子有感染力、氛围感、情绪化就标记为风险；"街角飘来火锅香""巷子里安静下来""阳光洒在石板路上""石阶顺着坡势往江边铺下去""绿荫把日光筛成碎片"等场景描写和品类环境画面只要不编造具体事实，属于安全表达层；比喻、通感、对仗、题眼句等修辞手法本身不构成风险
+   - generic_copy_quality_warn 只用于明确的空话堆积、固定短语复读、无意义连接词过度使用，不用于有记忆点的标题、有情绪的开场、有画面感的正文"""
+
+REVIEW_SCHEMA_REPAIR_SYSTEM_PROMPT = """你只整理一份已经完成的 Review JSON。
+不得重新审核攻略，不得增加、删除、合并、拆分或重排 issue，不得修改任何字符串内容。
+只允许做两类表示修正：
+1. plan_index/day/place_id 的纯数字字符串改为正整数；
+2. names/tags/side_effects 的单个字符串改为只含该字符串的数组。
+严格输出修正后的原 JSON 对象，只能包含 issues 和 overall_notes。无法按这些规则修正时原样返回。
+"""
 
 
 MINUTE_TRANSFER_RE = re.compile(r"(?:预计|约|大约|驾车|打车|步行|通勤)?\s*\d+\s*分钟")
@@ -887,7 +938,82 @@ def _issue_from_review_payload(raw_issue: dict) -> GenerationIssue | None:
     )
 
 
-def _parse_semantic_issues(raw: str) -> tuple[list[GenerationIssue], str]:
+def _positive_review_identifier(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and re.fullmatch(r"[1-9]\d*", value.strip()):
+        return int(value.strip())
+    return None
+
+
+def _review_repair_signature(data: dict) -> tuple[object, ...] | None:
+    raw_issues = data.get("issues")
+    if not isinstance(raw_issues, list):
+        return None
+    signatures: list[tuple[object, ...]] = []
+    for raw_issue in raw_issues:
+        if not isinstance(raw_issue, dict):
+            return None
+
+        def array_value(field: str) -> object:
+            value = raw_issue.get(field)
+            if isinstance(value, str):
+                return (value,)
+            if isinstance(value, list) and all(
+                isinstance(item, str) for item in value
+            ):
+                return tuple(value)
+            return value
+
+        signatures.append((
+            raw_issue.get("category"),
+            raw_issue.get("publish_action"),
+            raw_issue.get("reason"),
+            _positive_review_identifier(raw_issue.get("plan_index")),
+            _positive_review_identifier(raw_issue.get("day")),
+            _positive_review_identifier(raw_issue.get("place_id")),
+            array_value("names"),
+            raw_issue.get("snippet"),
+            raw_issue.get("evidence"),
+            array_value("tags"),
+            array_value("side_effects"),
+        ))
+    return (tuple(signatures), data.get("overall_notes", ""))
+
+
+def _allowed_review_fragment_keys(
+    plans: list[PlanOutput],
+    route_plans: list[RoutePlan] | None,
+    *,
+    action_plan_index: int | None,
+) -> set[tuple[int, int, int]]:
+    from_fragments = {
+        (int(fragment.plan_index), int(fragment.day), int(fragment.place_id))
+        for plan in plans
+        for fragment in plan.poi_fragments
+    }
+    if from_fragments:
+        return from_fragments
+    keys: set[tuple[int, int, int]] = set()
+    for offset, route_plan in enumerate(route_plans or [], 1):
+        plan_index = (
+            int(action_plan_index)
+            if action_plan_index is not None and len(route_plans or []) == 1
+            else offset
+        )
+        for day_group in route_plan.day_groups:
+            for place in day_group.places:
+                keys.add((plan_index, int(day_group.day), int(place.place_id)))
+    return keys
+
+
+def _parse_semantic_issues(
+    raw: str,
+    *,
+    allowed_fragment_keys: set[tuple[int, int, int]] | None = None,
+) -> tuple[list[GenerationIssue], str]:
     data = _parse_review_data(raw)
     if "issues" not in data:
         raise ReviewSafetyError(
@@ -954,15 +1080,27 @@ def _parse_semantic_issues(raw: str) -> tuple[list[GenerationIssue], str]:
             )
         for field in ("plan_index", "day", "place_id"):
             value = raw_issue.get(field)
-            if value is not None and (
-                not isinstance(value, int)
-                or isinstance(value, bool)
-                or value <= 0
-            ):
+            if value is None:
+                continue
+            normalized = _positive_review_identifier(value)
+            if normalized is None:
                 raise ReviewSafetyError(
                     f"审核结果 issue {field} 类型错误",
                     invalid_output_type="wrong_field_type",
                 )
+            raw_issue[field] = normalized
+        locator = tuple(
+            raw_issue.get(field) for field in ("plan_index", "day", "place_id")
+        )
+        if (
+            allowed_fragment_keys is not None
+            and all(isinstance(value, int) for value in locator)
+            and locator not in allowed_fragment_keys
+        ):
+            raise ReviewSafetyError(
+                "审核结果 issue fragment key 不属于锁定攻略",
+                invalid_output_type="schema_validation_failed",
+            )
         for field in ("names", "tags", "side_effects"):
             value = raw_issue.get(field)
             if value is not None and (
@@ -1002,6 +1140,7 @@ async def check(
     route_plans: list[RoutePlan] | None = None,
     poi_identity_results: list[PoiIdentityResult] | None = None,
     budget_results: list[BudgetResult] | None = None,
+    generator: str | None = None,
 ) -> tuple[list[PlanOutput], str]:
     """Backward-compatible wrapper around semantic issue collection."""
     if route_plans:
@@ -1036,6 +1175,7 @@ async def check(
             if plan.composition_blueprint is not None
         ] or None,
         return_notes=True,
+        generator=generator,
     )
     if any(issue.category == "BLOCKER" for issue in issues):
         raise ReviewSafetyError(
@@ -1060,6 +1200,8 @@ async def collect_semantic_generation_issues(
     attachment_auth_map: FoodAttachmentAuthMap | None = None,
     call_reason_prefix: str = "review_taxonomy",
     action_plan_index: int | None = None,
+    timeout_seconds: float = ORDINARY_REVIEW_REQUEST_TIMEOUT_SECONDS,
+    generator: str | None = None,
 ) -> list[GenerationIssue] | tuple[list[GenerationIssue], str]:
     """Collect semantic generation issues without rewriting plan text."""
     payload = structured_evidence_payload or build_structured_evidence_payload(
@@ -1134,60 +1276,115 @@ async def collect_semantic_generation_issues(
                 + "\n这些问题请按 issue taxonomy 归类，不要输出修正文案。"
             )
 
-    review_prompt = user_prompt
-    last_error: ReviewSafetyError | None = None
-    for attempt in range(2):
-        with llm_call_context(
-            call_reason=f"{call_reason_prefix}_attempt_{attempt + 1}",
-            attempt=attempt + 1,
-            role="review",
-            stage="REVIEW_TAXONOMY",
-            max_tokens_request=1200,
-            relay_request_timeout_seconds=ORDINARY_REVIEW_REQUEST_TIMEOUT_SECONDS,
-            relay_hedge_delay_seconds=1,
-        ):
-            raw = await chat(
-                system=SYSTEM_PROMPT,
-                user=review_prompt,
-                role="review",
-                temperature=0.1,
-                json_mode=True,
+    allowed_fragment_keys = _allowed_review_fragment_keys(
+        plans,
+        route_plans,
+        action_plan_index=action_plan_index,
+    )
+
+    # Cross-review routing: Opus Writer → DS Review, DS Writer → Qwen Review
+    reviewer_config = None
+    if generator:
+        from src.config import get_settings
+        settings = get_settings()
+        if generator.startswith("ds_"):
+            # DS Writer → Qwen Review (use relay path for compatibility)
+            reviewer_config = RoleConfig(
+                provider="relay",
+                model=settings.qwen_review_model,
+                api_key=settings.qwen_review_api_key,
+                base_url=settings.qwen_review_base_url,
             )
-        logger.info(
-            "YunTu Review raw output length: %d attempt=%d",
-            len(raw),
-            attempt + 1,
+        else:
+            # Opus Writer → DS Review (use default review config)
+            reviewer_config = None
+
+    with llm_call_context(
+        call_reason=f"{call_reason_prefix}_attempt_1",
+        attempt=1,
+        role="review",
+        stage="REVIEW_TAXONOMY",
+        max_tokens_request=REVIEW_MAX_TOKENS,
+        relay_request_timeout_seconds=timeout_seconds,
+        relay_hedge_delay_seconds=1,
+    ):
+        raw = await chat(
+            system=SYSTEM_PROMPT,
+            user=user_prompt,
+            role="review",
+            temperature=0.1,
+            json_mode=True,
+            role_config_override=reviewer_config,
+            max_tokens=REVIEW_MAX_TOKENS,
+        )
+    logger.info("YunTu Review raw output length: %d attempt=1", len(raw))
+
+    try:
+        issues, overall_notes = _parse_semantic_issues(
+            raw,
+            allowed_fragment_keys=allowed_fragment_keys,
+        )
+    except ReviewSafetyError as exc:
+        try:
+            original_data = _parse_review_data(raw)
+        except ReviewSafetyError:
+            raise ReviewSafetyError(
+                f"{exc}，拒绝返回未经完整语义审核的攻略",
+                invalid_output_type=exc.invalid_output_type,
+            ) from exc
+        original_signature = _review_repair_signature(original_data)
+        if original_signature is None:
+            raise ReviewSafetyError(
+                f"{exc}，拒绝返回未经完整语义审核的攻略",
+                invalid_output_type=exc.invalid_output_type,
+            ) from exc
+        logger.warning(
+            "YunTu Review compact schema repair after taxonomy parse failure: %s",
+            exc,
+        )
+        repair_user = json.dumps(
+            {
+                "validation_error": str(exc),
+                "invalid_review_json": original_data,
+            },
+            ensure_ascii=False,
+        )
+        with llm_call_context(
+            call_reason=f"{call_reason_prefix}_schema_repair",
+            attempt=2,
+            role="review",
+            stage="REVIEW_SCHEMA_REPAIR",
+            max_tokens_request=REVIEW_SCHEMA_REPAIR_MAX_TOKENS,
+            relay_request_timeout_seconds=REVIEW_SCHEMA_REPAIR_TIMEOUT_SECONDS,
+        ):
+            repaired_raw = await asyncio.wait_for(
+                chat(
+                    system=REVIEW_SCHEMA_REPAIR_SYSTEM_PROMPT,
+                    user=repair_user,
+                    role="review",
+                    temperature=0.0,
+                    json_mode=True,
+                    role_config_override=reviewer_config,
+                    max_tokens=REVIEW_SCHEMA_REPAIR_MAX_TOKENS,
+                ),
+                timeout=REVIEW_SCHEMA_REPAIR_TIMEOUT_SECONDS,
+            )
+        repaired_data = _parse_review_data(repaired_raw)
+        if _review_repair_signature(repaired_data) != original_signature:
+            raise ReviewSafetyError(
+                "审核 JSON 格式整理改变了原始 issue，拒绝采用",
+                invalid_output_type="schema_validation_failed",
+            ) from exc
+        issues, overall_notes = _parse_semantic_issues(
+            repaired_raw,
+            allowed_fragment_keys=allowed_fragment_keys,
         )
 
-        try:
-            issues, overall_notes = _parse_semantic_issues(raw)
-        except ReviewSafetyError as exc:
-            last_error = exc
-            if attempt == 1:
-                logger.error("YunTu Review taxonomy collection failed: %s", exc)
-                raise ReviewSafetyError(
-                    f"{last_error or exc}，拒绝返回未经完整语义审核的攻略",
-                    invalid_output_type=exc.invalid_output_type,
-                ) from exc
-            logger.warning(
-                "YunTu Review retrying after taxonomy parse failure: %s",
-                exc,
-            )
-            review_prompt = (
-                user_prompt
-                + "\n\n上一次审核输出不是合法 issue taxonomy JSON。"
-                "请重新输出一个完整 JSON 对象，只能包含 issues 和 overall_notes，"
-                "不要输出 corrected_plan_text 或任何修正文案。"
-            )
-            continue
-
-        if len(retrieval.candidates) < 5:
-            overall_notes += "\n[数据不足提醒] 当前城市候选地点不足5个，攻略仅供参考。"
-        if return_notes:
-            return issues, overall_notes
-        return issues
-
-    raise last_error or ReviewSafetyError("审核失败")
+    if len(retrieval.candidates) < 5:
+        overall_notes += "\n[数据不足提醒] 当前城市候选地点不足5个，攻略仅供参考。"
+    if return_notes:
+        return issues, overall_notes
+    return issues
 
 
 async def collect_semantic_generation_issues_by_plan(
@@ -1198,6 +1395,8 @@ async def collect_semantic_generation_issues_by_plan(
     structured_evidence_payload: StructuredEvidencePayload | None = None,
     weather_advisory_payload: WeatherAdvisoryPayload | None = None,
     attachment_auth_map: FoodAttachmentAuthMap | None = None,
+    timeout_seconds: float = ORDINARY_REVIEW_REQUEST_TIMEOUT_SECONDS,
+    generator: str | None = None,
 ) -> tuple[list[GenerationIssue], dict]:
     """Collect plan-local semantic issues concurrently with the existing schema."""
     if not plans:
@@ -1235,6 +1434,8 @@ async def collect_semantic_generation_issues_by_plan(
             },
             call_reason_prefix=f"review_taxonomy_plan_{zero_index + 1}",
             action_plan_index=zero_index + 1,
+            timeout_seconds=timeout_seconds,
+            generator=generator,
         )
         assert isinstance(issues, list)
         plan_index = zero_index + 1

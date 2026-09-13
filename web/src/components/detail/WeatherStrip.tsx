@@ -1,5 +1,6 @@
 import type { TripWeather, WeatherDay } from "@/types/trip";
 import { weatherIcon, collectWeatherReminders } from "@/constants/weather";
+import { Calendar, CircleAlert } from "lucide-react";
 
 interface WeatherStripProps {
   data: TripWeather | null | undefined;
@@ -30,7 +31,7 @@ export function WeatherStrip({ data }: WeatherStripProps) {
     if (status === "skipped_date_out_of_range") {
       return (
         <div className="rounded-xl border border-gray-100 bg-white/70 px-4 py-3 text-xs text-gray-500 shadow-2xs">
-          <i className="fas fa-calendar-alt text-primary-500 mr-2" aria-hidden="true" />
+          <Calendar size={14} className="text-primary-500 mr-2 inline-block" aria-hidden="true" />
           <span>出发日期较远，临近出行时可查看天气预报</span>
         </div>
       );
@@ -80,7 +81,7 @@ export function WeatherStrip({ data }: WeatherStripProps) {
       {/* 聚合提醒条（仅 reminders 非空时渲染） */}
       {reminders.length > 0 && (
         <div className="flex items-start gap-2 rounded-xl border border-amber-200/80 bg-amber-50/90 px-3.5 py-2.5 shadow-2xs">
-          <i className="fas fa-exclamation-circle text-amber-500 text-xs mt-0.5 shrink-0" aria-hidden="true" />
+          <CircleAlert size={12} className="text-amber-500 mt-0.5 shrink-0" aria-hidden="true" />
           <div className="space-y-1 text-xs leading-relaxed text-amber-800">
             {reminders.map((rem: string, idx: number) => (
               <p key={`${rem}-${idx}`}>{rem}</p>

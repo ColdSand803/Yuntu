@@ -21,18 +21,21 @@ export function commuteModeName(mode: string): string {
   return map[mode] ?? mode;
 }
 
-/** 出行方式 → FontAwesome 图标（不含 fa-solid 前缀）。 */
-export const COMMUTE_MODE_ICON: Record<string, string> = {
-  walking: "fa-person-walking",
-  transit: "fa-bus",
-  taxi: "fa-car",
-  driving: "fa-car-side",
-  cycling: "fa-bicycle",
+import type { LucideIcon } from "lucide-react";
+import { Footprints, Bus, Car, Bike } from "lucide-react";
+
+/** 出行方式 → Lucide 图标组件。 */
+export const COMMUTE_MODE_ICON: Record<string, LucideIcon> = {
+  walking: Footprints,
+  transit: Bus,
+  taxi: Car,
+  driving: Car,
+  cycling: Bike,
 };
 
 /** 出行方式对应图标，未知 mode 落到驾车图标。 */
-export function commuteModeIcon(mode: string): string {
-  return COMMUTE_MODE_ICON[mode] ?? "fa-car-side";
+export function commuteModeIcon(mode: string): LucideIcon {
+  return COMMUTE_MODE_ICON[mode] ?? Car;
 }
 
 /**

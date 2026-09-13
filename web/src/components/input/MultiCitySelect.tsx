@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
-import { SUPPORTED_CITIES } from "@/constants/preferences";
-import { cityImageList } from "@/components/input/RotatingBackground";
+import { useEffect, useRef, useState, useMemo } from "react";
+import { CircleAlert } from "lucide-react";
+import { useDestinations } from "@/hooks/useDestinations";
 
 interface MultiCitySelectProps {
   value: string[];
@@ -9,13 +9,20 @@ interface MultiCitySelectProps {
   error?: string;
 }
 
-// 热门目的地 = 后端已开放城市，复用 SUPPORTED_CITIES 单一数据源
-const HOT_CITIES = SUPPORTED_CITIES;
 const MAX_CITIES = 5;
 
 export function MultiCitySelect({ value, onChange, multiCity = true, error }: MultiCitySelectProps) {
+  const { data: destinationsData, isLoading, error: directoryError, refetch } = useDestinations();
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
+
+  const SUPPORTED_CITIES = useMemo(() => {
+    return destinationsData?.destinations
+      .filter(dest => dest.isActive !== false)
+      .map(dest => dest.name) || [];
+  }, [destinationsData]);
+
+  const HOT_CITIES = SUPPORTED_CITIES;
 
   useEffect(() => {
     if (!pickerOpen) return;
@@ -45,7 +52,8 @@ export function MultiCitySelect({ value, onChange, multiCity = true, error }: Mu
 
   function prefetchCity(city: string) {
     if (typeof window !== "undefined") {
-      const urls = cityImageList(city);
+      const entry = destinationsData?.destinations.find(d => d.name === city);
+      const urls = [entry?.backgroundImageUrl, entry?.coverImageUrl].filter((url): url is string => Boolean(url));
       if (urls.length > 0) {
         const img = new Image();
         img.src = urls[0];
@@ -55,8 +63,18 @@ export function MultiCitySelect({ value, onChange, multiCity = true, error }: Mu
 
   const available = SUPPORTED_CITIES.filter((c) => !value.includes(c));
 
+  if (isLoading) {
+    return (
+      <div className="space-y-2.5">
+        <p className="text-sm text-gray-500">加载城市列表中...</p>
+      </div>
+    );
+  }
+
+  if (directoryError) return <div role="alert">城市目录加载失败 <button type="button" onClick={() => void refetch()}>重试</button></div>;
   return (
     <div className="space-y-2.5">
+      {!SUPPORTED_CITIES.length && <p>暂无可选城市</p>}
       {/* 已选城市芯片 */}
       <div className="flex flex-wrap items-center gap-2">
         {value.map((city, idx) => (
@@ -142,7 +160,7 @@ export function MultiCitySelect({ value, onChange, multiCity = true, error }: Mu
       </div>
       {error && (
         <p className="flex items-center gap-1.5 text-xs text-red-600">
-          <i className="fas fa-circle-exclamation" aria-hidden="true"></i>
+          <CircleAlert size={14} aria-hidden="true" />
           {error}
         </p>
       )}

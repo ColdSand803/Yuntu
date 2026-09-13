@@ -53,6 +53,8 @@ class GeocodeResult:
     province: str | None = None
     city: str | None = None
     district: str | None = None
+    level: str | None = None
+    match_count: int = 1
 
 
 @dataclass(frozen=True)
@@ -307,6 +309,8 @@ class AmapClient:
             province=_as_text(item.get("province")),
             city=_as_text(item.get("city")),
             district=_as_text(item.get("district")),
+            level=_as_text(item.get("level")),
+            match_count=len(geocodes),
         )
 
     async def search_poi(

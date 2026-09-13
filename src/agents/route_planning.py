@@ -9,6 +9,7 @@ import logging
 import math
 import re
 import time
+import weakref
 from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import cmp_to_key
@@ -32,15 +33,24 @@ from src.agents.schema import (
     CandidatePlace,
     CommuteLeg,
     EffectiveCommuteMode,
+    PoiSelectionResult,
+    QualifiedRouteSupplement,
     RetrievalResult,
     RouteDayGroup,
+    AccessLeg,
     RoutePlan,
+    RouteMembershipLedger,
+    SelectedRouteMembership,
     TransitDetailQuality,
     TransitStep,
     TripRequest,
     PlanOutput,
 )
 from src.config import get_settings
+from src.agents.route_feasibility import (
+    POLICY_VERSION, DWELL_TIME_MINUTES, DayContext, build_visit_profile,
+    evaluate_day, day_slot_limit, daytime_activity, valid_coordinate, access_summary,
+)
 from src.cost_sources.common import utc_now
 from src.cost_sources.local_transport import (
     adapt_amap_route_fare,
@@ -82,6 +92,53 @@ AMAP_ROUTE_RATE_LIMIT_MARKERS = (
     "\u8d85\u8fc7",
     "\u9891\u7e41",
 )
+
+
+class _ProcessWideAmapRateLimiter:
+    """Share Amap start-rate capacity across every job in one event loop."""
+
+    def __init__(self) -> None:
+        self._states: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+    def _state(self) -> tuple[asyncio.Lock, dict[tuple[str, str], float]]:
+        loop = asyncio.get_running_loop()
+        state = self._states.get(loop)
+        if state is None:
+            state = (asyncio.Lock(), {})
+            self._states[loop] = state
+        return state
+
+    async def wait_for_slot(
+        self,
+        *,
+        scope: tuple[str, str],
+        min_interval: float,
+        deadline_monotonic: float | None,
+    ) -> float | None:
+        lock, next_start_by_scope = self._state()
+        async with lock:
+            now = time.monotonic()
+            scheduled = max(now, next_start_by_scope.get(scope, 0.0))
+            if deadline_monotonic is not None and scheduled >= deadline_monotonic:
+                return None
+            next_start_by_scope[scope] = scheduled + max(0.0, min_interval)
+        wait_seconds = max(0.0, scheduled - time.monotonic())
+        if wait_seconds > 0:
+            await asyncio.sleep(wait_seconds)
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            return None
+        return wait_seconds
+
+    def reset_current_loop(self) -> None:
+        """Test-only reset without disturbing limiters owned by other loops."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._states.pop(loop, None)
+
+
+_PROCESS_WIDE_AMAP_RATE_LIMITER = _ProcessWideAmapRateLimiter()
 REMOTE_CENTER_DISTANCE_KM = 35.0
 REMOTE_CLUSTER_DISTANCE_KM = 25.0
 URBAN_CORE_NEIGHBOR_KM = 15.0
@@ -107,25 +164,6 @@ _NEAR_DUPLICATE_CHAR_MAP = str.maketrans({
 _NEAR_DUPLICATE_SUFFIXES = ALIAS_SUFFIXES
 _NEAR_DUPLICATE_CONTAINMENT_MIN_LEN = 2
 _NEAR_DUPLICATE_CONTAINMENT_MAX_DISTANCE_KM = 1.5
-
-# Estimated dwell time by place_type (minutes)
-DWELL_TIME_MINUTES = {
-    "attraction": 75,
-    "museum": 120,
-    "park": 90,
-    "scenic_area": 150,
-    "business_area": 60,
-    "market": 45,
-    "street": 45,
-    "photo_spot": 30,
-    "restaurant": 60,
-    "cafe": 45,
-    "snack": 30,
-    "food": 60,
-    "dessert": 30,
-    "hotel": 0,
-    "other": 75,
-}
 
 # Place weights for daily budget (not precise minutes, relative weights)
 PLACE_WEIGHTS = {
@@ -282,6 +320,59 @@ class RouteProviderBudgetExceededError(RouteProviderRateLimitError):
     """Raised when main-path precise route enrichment exceeds its budget."""
 
 
+class RoutePlanInvariantError(RuntimeError):
+    """Raised with the deterministic day structure that failed Route invariants."""
+
+    def __init__(
+        self,
+        violations: list[str],
+        day_groups: list[RouteDayGroup],
+    ) -> None:
+        self.violations = tuple(violations)
+        self.day_groups = tuple(day_groups)
+        super().__init__(
+            "route plan invariant violation: " + "; ".join(violations)
+        )
+
+
+class RouteMustIncludeConflictError(RuntimeError):
+    """Raised when a deterministically resolved must-go cannot be routed."""
+
+    def __init__(self, place_ids: set[int] | list[int], reason: str) -> None:
+        self.place_ids = tuple(sorted(place_ids))
+        self.reason = reason
+        super().__init__(
+            "resolved must-go route conflict: "
+            f"place_ids={list(self.place_ids)}, reason={reason}"
+        )
+
+
+class SelectedRoutePreciseConflictError(RuntimeError):
+    """Precise evidence changed selected membership on a transactional trial."""
+
+    def __init__(
+        self,
+        *,
+        added_place_ids: set[int],
+        removed_place_ids: set[int],
+        original_day_place_ids: list[list[int]],
+        trial_day_place_ids: list[list[int]],
+        trial_plan: RoutePlan,
+    ) -> None:
+        self.added_place_ids = tuple(sorted(added_place_ids))
+        self.removed_place_ids = tuple(sorted(removed_place_ids))
+        self.original_day_place_ids = tuple(
+            tuple(day) for day in original_day_place_ids
+        )
+        self.trial_day_place_ids = tuple(tuple(day) for day in trial_day_place_ids)
+        self.trial_plan = trial_plan
+        super().__init__(
+            "precise route evidence conflicts with locked selected membership: "
+            f"added_place_ids={list(self.added_place_ids)}, "
+            f"removed_place_ids={list(self.removed_place_ids)}"
+        )
+
+
 class _MissingTransitCitycodeError(RouteProviderError):
     """Internal estimate fallback when transit routing lacks a citycode."""
 
@@ -297,8 +388,8 @@ class PreciseRoute:
     fare_observation: SourceObservation | None = None
 
 
-AMAP_ROUTE_CACHE_PAYLOAD_VERSION = 3
-AMAP_V5_COST_CACHE_PROVIDER = "amap_v5_cost_v3"
+AMAP_ROUTE_CACHE_PAYLOAD_VERSION = 4
+AMAP_V5_COST_CACHE_PROVIDER = "amap_v5_cost_v4"
 
 
 TRANSIT_DETAIL_GENERIC_TEMPLATE = (
@@ -418,6 +509,32 @@ def _ride_step(payload: Any) -> tuple[TransitStep | None, bool]:
     ), False
 
 
+_TRANSIT_SEGMENT_KEYS = {
+    "walking",
+    "bus",
+    "railway",
+    "taxi",
+    "entrance",
+    "exit",
+}
+
+
+def _select_busline_candidate(buslines: Any) -> Any | None:
+    """Pick the same busline candidate used by public transit_steps."""
+    if not isinstance(buslines, list):
+        return None
+    first_partial: Any | None = None
+    for busline in buslines:
+        step, _ = _ride_step(busline)
+        if step is None:
+            continue
+        if step.line_name and step.from_stop and step.to_stop:
+            return busline
+        if first_partial is None:
+            first_partial = busline
+    return first_partial
+
+
 def normalize_transit_detail(
     transit: Any,
 ) -> tuple[tuple[TransitStep, ...], bool]:
@@ -429,14 +546,6 @@ def normalize_transit_detail(
         return (), True
     normalized: list[TransitStep] = []
     unsupported = False
-    known_segment_keys = {
-        "walking",
-        "bus",
-        "railway",
-        "taxi",
-        "entrance",
-        "exit",
-    }
     for segment in segments:
         if not isinstance(segment, dict):
             unsupported = unsupported or bool(segment)
@@ -461,22 +570,10 @@ def normalize_transit_detail(
         if isinstance(bus, dict):
             buslines = bus.get("buslines") or []
             if isinstance(buslines, list):
+                selected_busline = _select_busline_candidate(buslines)
                 selected_step: TransitStep | None = None
-                first_partial_step: TransitStep | None = None
-                for busline in buslines:
-                    step, _ = _ride_step(busline)
-                    if step is None:
-                        continue
-                    if (
-                        step.line_name
-                        and step.from_stop
-                        and step.to_stop
-                    ):
-                        selected_step = step
-                        break
-                    if first_partial_step is None:
-                        first_partial_step = step
-                selected_step = selected_step or first_partial_step
+                if selected_busline is not None:
+                    selected_step, _ = _ride_step(selected_busline)
                 if selected_step is not None:
                     normalized.append(selected_step)
                 elif buslines:
@@ -506,7 +603,7 @@ def normalize_transit_detail(
         if segment.get("taxi"):
             unsupported = True
         for key, value in segment.items():
-            if key not in known_segment_keys and isinstance(value, (dict, list)) and value:
+            if key not in _TRANSIT_SEGMENT_KEYS and isinstance(value, (dict, list)) and value:
                 unsupported = True
     return tuple(normalized), unsupported
 
@@ -568,8 +665,19 @@ def format_transit_summary(
 
 @dataclass
 class RoutePlanningMetrics:
+    route_policy_version: str = "legacy"
+    route_v2_trial_count: int = 0
+    route_v2_repair_rounds: int = 0
+    accommodation_metrics: dict[str, Any] = field(default_factory=dict)
+    route_v2_accepted_action: str = ""
+    route_v2_stop_reason: str = ""
+    route_v2_local_repair_evaluations: int = 0
+    route_v2_repair_batches: int = 0
+    access_route_attempt_count: int = 0
+    access_route_fact_count: int = 0
     plan_count: int = 0
     day_count: int = 0
+    # Final-plan snapshot, recomputed from returned plans at the workflow exit.
     commute_leg_count: int = 0
     amap_cache_hit_count: int = 0
     amap_cache_write_count: int = 0
@@ -589,8 +697,11 @@ class RoutePlanningMetrics:
     amap_fallback_count: int = 0
     amap_rate_limit_count: int = 0
     amap_wait_ms: int = 0
+    amap_budget_call_hard_cap: int = 0
     amap_budget_call_limit: int = 0
+    amap_budget_unique_uncached_allocated_leg_count: int = 0
     amap_budget_time_limit_ms: int = 0
+    amap_budget_time_effective_limit_ms: int = 0
     amap_budget_call_exceeded_count: int = 0
     amap_budget_time_exceeded_count: int = 0
     amap_budget_exceeded_count: int = 0
@@ -606,6 +717,10 @@ class RoutePlanningMetrics:
     amap_precise_recovery_success_count: int = 0
     amap_precise_recovery_failed_count: int = 0
     amap_precise_recovery_estimate_day_count: int = 0
+    amap_precise_membership_conflict_count: int = 0
+    amap_precise_membership_conflict_removed_selected_count: int = 0
+    amap_precise_membership_conflict_structure_gap_count: int = 0
+    amap_precise_membership_soft_accept_count: int = 0
     amap_precise_recovery_reason_counts: dict[str, int] = field(
         default_factory=lambda: {
             "initial_incomplete": 0,
@@ -629,6 +744,11 @@ class RoutePlanningMetrics:
         }
     )
     route_quality: dict[str, Any] = field(default_factory=dict)
+    selected_used: int = 0
+    selected_dropped: int = 0
+    qualified_supplemented: int = 0
+    selected_drop_reason_counts: dict[str, int] = field(default_factory=dict)
+    supplement_reason_counts: dict[str, int] = field(default_factory=dict)
 
     def record_effective_leg(
         self,
@@ -636,6 +756,8 @@ class RoutePlanningMetrics:
         *,
         rationalized: bool,
     ) -> None:
+        # Attempt telemetry intentionally includes discarded transactional
+        # precise trials; it measures routing work/cost, not final membership.
         self.by_effective_mode[mode]["leg_count"] += 1
         if rationalized:
             self.by_effective_mode[mode]["rationalized_count"] += 1
@@ -651,9 +773,51 @@ class RoutePlanningMetrics:
             return
         self.amap_precise_recovery_reason_counts[reason] += max(0, int(count))
 
+    def record_membership_ledger(self, ledger: RouteMembershipLedger) -> None:
+        self.selected_used = sum(item.status == "USED" for item in ledger.selected)
+        self.selected_dropped = sum(
+            item.status == "DROPPED" for item in ledger.selected
+        )
+        self.qualified_supplemented = len(ledger.supplemented)
+        self.selected_drop_reason_counts = dict(
+            sorted({
+                reason: sum(item.reason == reason for item in ledger.selected)
+                for reason in (
+                    "HARD_INELIGIBLE",
+                    "TEMPORALLY_UNSCHEDULABLE",
+                    "CAPACITY_LIMIT",
+                    "ROUTE_FEASIBILITY_LIMIT",
+                    "NOT_CHOSEN_FOR_FINAL_ROUTE",
+                )
+                if any(item.reason == reason for item in ledger.selected)
+            }.items())
+        )
+        self.supplement_reason_counts = dict(
+            sorted({
+                reason: sum(item.reason == reason for item in ledger.supplemented)
+                for reason in ("REPLACE_DROPPED", "FILL_EMPTY_DAY", "FILL_MUST_INCLUDE_DAY")
+                if any(item.reason == reason for item in ledger.supplemented)
+            }.items())
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
+            "route_policy_version": self.route_policy_version,
+            "route_v2_trial_count": self.route_v2_trial_count,
+            "route_v2_repair_rounds": self.route_v2_repair_rounds,
+            "accommodation": dict(self.accommodation_metrics),
+            "route_v2_accepted_action": self.route_v2_accepted_action,
+            "route_v2_stop_reason": self.route_v2_stop_reason,
+            "route_v2_local_repair_evaluations": self.route_v2_local_repair_evaluations,
+            "route_v2_repair_batches": self.route_v2_repair_batches,
+            "access_route_attempt_count": self.access_route_attempt_count,
+            "access_route_fact_count": self.access_route_fact_count,
             "plan_count": self.plan_count,
+            "selected_used": self.selected_used,
+            "selected_dropped": self.selected_dropped,
+            "qualified_supplemented": self.qualified_supplemented,
+            "selected_drop_reason_counts": dict(self.selected_drop_reason_counts),
+            "supplement_reason_counts": dict(self.supplement_reason_counts),
             "day_count": self.day_count,
             "commute_leg_count": self.commute_leg_count,
             "amap_cache_hit_count": self.amap_cache_hit_count,
@@ -676,8 +840,15 @@ class RoutePlanningMetrics:
             "amap_fallback_count": self.amap_fallback_count,
             "amap_rate_limit_count": self.amap_rate_limit_count,
             "amap_wait_ms": self.amap_wait_ms,
+            "amap_budget_call_hard_cap": self.amap_budget_call_hard_cap,
             "amap_budget_call_limit": self.amap_budget_call_limit,
+            "amap_budget_unique_uncached_allocated_leg_count": (
+                self.amap_budget_unique_uncached_allocated_leg_count
+            ),
             "amap_budget_time_limit_ms": self.amap_budget_time_limit_ms,
+            "amap_budget_time_effective_limit_ms": (
+                self.amap_budget_time_effective_limit_ms
+            ),
             "amap_budget_call_exceeded_count": self.amap_budget_call_exceeded_count,
             "amap_budget_time_exceeded_count": self.amap_budget_time_exceeded_count,
             "amap_budget_exceeded_count": self.amap_budget_exceeded_count,
@@ -708,6 +879,18 @@ class RoutePlanningMetrics:
             ),
             "amap_precise_recovery_estimate_day_count": (
                 self.amap_precise_recovery_estimate_day_count
+            ),
+            "amap_precise_membership_conflict_count": (
+                self.amap_precise_membership_conflict_count
+            ),
+            "amap_precise_membership_conflict_removed_selected_count": (
+                self.amap_precise_membership_conflict_removed_selected_count
+            ),
+            "amap_precise_membership_conflict_structure_gap_count": (
+                self.amap_precise_membership_conflict_structure_gap_count
+            ),
+            "amap_precise_membership_soft_accept_count": (
+                self.amap_precise_membership_soft_accept_count
             ),
             "amap_precise_recovery_reason_counts": dict(
                 self.amap_precise_recovery_reason_counts
@@ -834,6 +1017,8 @@ class AmapRouteProvider:
         *,
         mode_aware: bool | None = None,
         metrics: RoutePlanningMetrics | None = None,
+        deadline_monotonic: float | None = None,
+        wall_start_monotonic: float | None = None,
     ) -> None:
         settings = get_settings()
         self.api_generation = (
@@ -855,13 +1040,40 @@ class AmapRouteProvider:
         self.min_interval = 1 / max(settings.amap_route_qps, 0.1)
         self.backoff_seconds = max(0.0, settings.amap_route_backoff_seconds)
         self.cache_ttl_seconds = max(1, settings.amap_route_cache_ttl_hours) * 3600
-        self.call_budget = max(0, int(settings.amap_route_call_budget or 0))
+        self.hard_call_cap = max(0, int(settings.amap_route_call_budget or 0))
+        self.call_budget = self.hard_call_cap
         self.time_budget_ms = max(0, int(settings.amap_route_time_budget_ms or 0))
+        wall_start = (
+            float(wall_start_monotonic)
+            if wall_start_monotonic is not None
+            else time.monotonic()
+        )
+        self._wall_start_monotonic = wall_start
+        configured_deadline = (
+            wall_start + (self.time_budget_ms / 1000.0)
+            if self.time_budget_ms > 0
+            else None
+        )
+        if deadline_monotonic is not None:
+            self._deadline_monotonic = float(deadline_monotonic)
+            if configured_deadline is not None:
+                self._deadline_monotonic = min(
+                    self._deadline_monotonic,
+                    configured_deadline,
+                )
+        elif configured_deadline is not None:
+            self._deadline_monotonic = configured_deadline
+        else:
+            self._deadline_monotonic = None
+        effective_time_ms = 0
+        if self._deadline_monotonic is not None:
+            effective_time_ms = max(
+                0,
+                round((self._deadline_monotonic - wall_start) * 1000),
+            )
         self.redis_url = settings.redis_url.strip()
         self._disabled_until = 0.0
         self._disabled_reason = ""
-        self._last_request_started = 0.0
-        self._rate_lock = asyncio.Lock()
         self._budget_lock = asyncio.Lock()
         self._client = httpx.AsyncClient()
         self._metrics = metrics
@@ -871,14 +1083,19 @@ class AmapRouteProvider:
         self._redis_client = None
         self._memory_cache: dict[str, PreciseRoute] = {}
         self._memory_cache_expires_at: dict[str, float] = {}
-        self._http_elapsed_ms = 0
         self._call_count = 0
+        self._allocation_started = False
+        self._allocated_call_limit = self.hard_call_cap
+        self._allocated_uncached_keys: set[str] = set()
         if self._metrics is not None:
             self._metrics.amap_cache_redis_configured = int(bool(self.redis_url))
             self._metrics.amap_cache_redis_available = int(self._redis_available)
             self._metrics.amap_cache_ttl_seconds = self.cache_ttl_seconds
-            self._metrics.amap_budget_call_limit = self.call_budget
+            self._metrics.amap_budget_call_hard_cap = self.hard_call_cap
+            self._metrics.amap_budget_call_limit = self._allocated_call_limit
+            self._metrics.amap_budget_unique_uncached_allocated_leg_count = 0
             self._metrics.amap_budget_time_limit_ms = self.time_budget_ms
+            self._metrics.amap_budget_time_effective_limit_ms = effective_time_ms
 
     @classmethod
     def _cache_key(
@@ -894,7 +1111,7 @@ class AmapRouteProvider:
         destination_longitude: float | None = None,
         destination_latitude: float | None = None,
     ) -> str:
-        namespace = "cost_v3" if api_generation == "v5" else "v3"
+        namespace = "cost_v4" if api_generation == "v5" else "v3"
         return (
             f"amap:route:{namespace}:"
             f"{cls._cache_part(api_generation)}:"
@@ -946,7 +1163,7 @@ class AmapRouteProvider:
         api_generation: str,
         mode: EffectiveCommuteMode,
     ) -> str:
-        return cls._cache_key(
+        key = cls._cache_key(
             origin.place_id,
             destination.place_id,
             api_generation=api_generation,
@@ -957,6 +1174,8 @@ class AmapRouteProvider:
             destination_longitude=destination.longitude,
             destination_latitude=destination.latitude,
         )
+        # Coordinate-only lodging endpoints never share Canonical POI cache identity.
+        return "access:v1:" + key if origin.place_id == 0 or destination.place_id == 0 else key
 
     @staticmethod
     def _coordinates_match(
@@ -1059,7 +1278,7 @@ class AmapRouteProvider:
                 route = PreciseRoute(
                     distance_meters=route.distance_meters,
                     duration_minutes=route.duration_minutes,
-                    encoded_polyline=route.encoded_polyline if mode == "driving" else "",
+                    encoded_polyline=str(route_fact.get("encoded_polyline") or ""),
                     transit_steps=steps,
                     transit_detail_quality=quality,
                     transit_detail_cache_hit=mode == "transit",
@@ -1068,6 +1287,32 @@ class AmapRouteProvider:
             return route
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError):
             return None
+
+    @staticmethod
+    def _v5_route_fact(
+        route: PreciseRoute,
+        *,
+        mode: EffectiveCommuteMode,
+    ) -> dict[str, Any]:
+        fact: dict[str, Any] = {
+            "version": AMAP_ROUTE_CACHE_PAYLOAD_VERSION,
+            "encoded_polyline": route.encoded_polyline or "",
+            "fare_observation": (
+                route.fare_observation.model_dump(mode="json")
+                if route.fare_observation is not None
+                else None
+            ),
+        }
+        if mode == "transit":
+            fact["transit_detail"] = {
+                "version": 2,
+                "steps": [
+                    step.model_dump(mode="json")
+                    for step in route.transit_steps
+                ],
+                "quality": route.transit_detail_quality,
+            }
+        return fact
 
     @staticmethod
     def _route_to_cache_payload(
@@ -1089,35 +1334,111 @@ class AmapRouteProvider:
         }
         if api_generation == "v5":
             payload["payload_version"] = AMAP_ROUTE_CACHE_PAYLOAD_VERSION
-            payload["route_fact"] = {
-                "version": AMAP_ROUTE_CACHE_PAYLOAD_VERSION,
-                "fare_observation": (
-                    route.fare_observation.model_dump(mode="json")
-                    if route.fare_observation is not None
-                    else None
-                ),
-            }
-            if mode == "transit":
-                payload["route_fact"]["transit_detail"] = {
-                    "version": 2,
-                    "steps": [
-                        step.model_dump(mode="json")
-                        for step in route.transit_steps
-                    ],
-                    "quality": route.transit_detail_quality,
-                }
+            payload["route_fact"] = AmapRouteProvider._v5_route_fact(
+                route,
+                mode=mode,
+            )
         return json.dumps(payload, separators=(",", ":"))
 
     @staticmethod
-    def _flatten_step_polyline(path: dict) -> str:
-        parts: list[str] = []
-        for step in path.get("steps") or []:
+    def _normalized_polyline_points(raw: Any) -> list[str]:
+        if isinstance(raw, dict):
+            raw = raw.get("polyline")
+        if not isinstance(raw, str):
+            return []
+        points: list[str] = []
+        for token in raw.split(";"):
+            pair = token.strip()
+            if not pair:
+                continue
+            parts = pair.split(",")
+            if len(parts) != 2:
+                continue
+            lng_text = parts[0].strip()
+            lat_text = parts[1].strip()
+            if not lng_text or not lat_text:
+                continue
+            try:
+                longitude = float(lng_text)
+                latitude = float(lat_text)
+            except ValueError:
+                continue
+            if not math.isfinite(longitude) or not math.isfinite(latitude):
+                continue
+            points.append(f"{lng_text},{lat_text}")
+        return points
+
+    @staticmethod
+    def _step_polyline_points(path: Any) -> list[str]:
+        steps = path.get("steps") if isinstance(path, dict) else None
+        if not isinstance(steps, list):
+            return []
+        points: list[str] = []
+        for step in steps:
             if not isinstance(step, dict):
                 continue
-            polyline = str(step.get("polyline") or "").strip().strip(";")
-            if polyline:
-                parts.append(polyline)
-        return ";".join(parts)
+            points.extend(
+                AmapRouteProvider._normalized_polyline_points(step.get("polyline"))
+            )
+        return points
+
+    @staticmethod
+    def _flatten_step_polyline(path: dict) -> str:
+        points = AmapRouteProvider._step_polyline_points(path)
+        if len(points) < 2:
+            return ""
+        return ";".join(points)
+
+    @staticmethod
+    def _flatten_transit_polyline(transit: Any) -> str:
+        if not isinstance(transit, dict):
+            return ""
+        segments = transit.get("segments")
+        if not isinstance(segments, list):
+            return ""
+        points: list[str] = []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                return ""
+            for key, value in segment.items():
+                if (
+                    key not in _TRANSIT_SEGMENT_KEYS
+                    and isinstance(value, (dict, list))
+                    and value
+                ):
+                    return ""
+            if segment.get("railway") or segment.get("taxi"):
+                return ""
+            walking = segment.get("walking")
+            if isinstance(walking, dict) and walking:
+                walking_points = AmapRouteProvider._step_polyline_points(walking)
+                if len(walking_points) < 2:
+                    return ""
+                points.extend(walking_points)
+            elif walking:
+                return ""
+            bus = segment.get("bus")
+            if isinstance(bus, dict):
+                buslines = bus.get("buslines") or []
+                if not isinstance(buslines, list):
+                    return ""
+                if buslines:
+                    selected = _select_busline_candidate(buslines)
+                    if not isinstance(selected, dict):
+                        return ""
+                    bus_points = AmapRouteProvider._normalized_polyline_points(
+                        selected.get("polyline")
+                    )
+                    if len(bus_points) < 2:
+                        return ""
+                    points.extend(bus_points)
+                elif bus:
+                    return ""
+            elif bus:
+                return ""
+        if len(points) < 2:
+            return ""
+        return ";".join(points)
 
     async def preload_cache_for_plans(
         self,
@@ -1188,6 +1509,8 @@ class AmapRouteProvider:
                     self._metrics.amap_cache_error_count += 1
                     self._metrics.amap_cache_redis_available = 0
                 logger.info("Redis route cache preload failed; using Postgres cache")
+        # Coordinate access is Redis/memory-only: the PG table is keyed by POI IDs.
+        redis_misses = {k: v for k, v in redis_misses.items() if v[0].place_id > 0 and v[1].place_id > 0}
         if not redis_misses:
             return
         missed_pairs = [
@@ -1344,13 +1667,28 @@ class AmapRouteProvider:
                     return PreciseRoute(
                         distance_meters=route.distance_meters,
                         duration_minutes=route.duration_minutes,
-                        encoded_polyline="",
+                        encoded_polyline=route.encoded_polyline,
                         transit_steps=route.transit_steps,
                         transit_detail_quality=route.transit_detail_quality,
                         transit_detail_cache_hit=True,
                         fare_observation=route.fare_observation,
                     )
                 return route
+        if origin.place_id == 0 or destination.place_id == 0:
+            redis_client = await self._get_redis_client()
+            if redis_client is not None:
+                try:
+                    raw = await asyncio.wait_for(redis_client.get(cache_key), timeout=self._redis_timeout)
+                    route = self._route_from_cache_payload(raw, api_generation=self.api_generation, mode=mode)
+                    if route is not None:
+                        self._remember_cache(cache_key, route)
+                        if self._metrics is not None:
+                            self._metrics.amap_cache_hit_count += 1
+                            self._metrics.amap_cache_redis_hit_count += 1
+                        return route
+                except Exception:
+                    self._redis_available = False
+            return None
         if not self._cache_available:
             return None
         try:
@@ -1472,6 +1810,10 @@ class AmapRouteProvider:
                     self._metrics.amap_cache_error_count += 1
                     self._metrics.amap_cache_redis_available = 0
                 logger.info("Redis route cache write failed; using Postgres cache")
+        if origin.place_id == 0 or destination.place_id == 0:
+            self._remember_cache(self._route_cache_key(origin=origin, destination=destination,
+                city=city, api_generation=self.api_generation, mode=mode), route)
+            return
         if not self._cache_available:
             return
         try:
@@ -1520,24 +1862,10 @@ class AmapRouteProvider:
                         "distance_meters": route.distance_meters,
                         "duration_minutes": route.duration_minutes,
                         "transit_steps_json": (
-                            json.dumps({
-                                "version": AMAP_ROUTE_CACHE_PAYLOAD_VERSION,
-                                "fare_observation": (
-                                    route.fare_observation.model_dump(mode="json")
-                                    if route.fare_observation is not None
-                                    else None
-                                ),
-                                **({
-                                    "transit_detail": {
-                                        "version": 2,
-                                        "steps": [
-                                            step.model_dump(mode="json")
-                                            for step in route.transit_steps
-                                        ],
-                                        "quality": route.transit_detail_quality,
-                                    },
-                                } if mode == "transit" else {}),
-                            })
+                            json.dumps(
+                                self._v5_route_fact(route, mode=mode),
+                                separators=(",", ":"),
+                            )
                             if self.api_generation == "v5"
                             else None
                         ),
@@ -1562,54 +1890,154 @@ class AmapRouteProvider:
             route,
         )
 
-    def _assert_amap_budget_available(self) -> None:
-        if self.call_budget:
-            if self._call_count >= self.call_budget:
-                if self._metrics is not None:
-                    self._metrics.amap_budget_call_exceeded_count += 1
-                    self._metrics.amap_budget_exceeded_count += 1
-                raise RouteProviderBudgetExceededError(
-                    f"Amap route call budget exceeded: {self.call_budget}"
-                )
-        if self.time_budget_ms and self._http_elapsed_ms >= self.time_budget_ms:
-            if self._metrics is not None:
-                self._metrics.amap_budget_time_exceeded_count += 1
-                self._metrics.amap_budget_exceeded_count += 1
-            raise RouteProviderBudgetExceededError(
-                f"Amap route time budget exceeded: {self.time_budget_ms}ms"
-            )
+    def _memory_cache_has(self, cache_key: str) -> bool:
+        if cache_key not in self._memory_cache:
+            return False
+        expires_at = self._memory_cache_expires_at.get(cache_key)
+        if expires_at is not None and expires_at <= time.monotonic():
+            self._memory_cache.pop(cache_key, None)
+            self._memory_cache_expires_at.pop(cache_key, None)
+            return False
+        return True
 
-    async def _reserve_amap_call(self) -> float:
+    def _plan_route_cache_keys(
+        self,
+        plan: RoutePlan,
+        *,
+        city: str,
+        generation_mode: EffectiveCommuteMode,
+    ) -> set[str]:
+        keys: set[str] = set()
+        for day_group in plan.day_groups:
+            for index in range(max(0, len(day_group.places) - 1)):
+                origin = day_group.places[index]
+                destination = day_group.places[index + 1]
+                keys.add(
+                    self._route_cache_key(
+                        origin=origin,
+                        destination=destination,
+                        city=city,
+                        api_generation=self.api_generation,
+                        mode=resolve_leg_effective_mode(
+                            origin,
+                            destination,
+                            generation_mode=generation_mode,
+                        ),
+                    )
+                )
+        return keys
+
+    def allocate_uncached_plan_calls(
+        self,
+        plan: RoutePlan,
+        *,
+        city: str,
+        generation_mode: EffectiveCommuteMode,
+    ) -> int:
+        keys = self._plan_route_cache_keys(
+            plan,
+            city=city,
+            generation_mode=generation_mode,
+        )
+        uncached = {
+            key for key in keys
+            if not self._memory_cache_has(key)
+        }
+        new_keys = uncached - self._allocated_uncached_keys
+        if not self._allocation_started:
+            self._allocation_started = True
+            self._allocated_call_limit = 0
+        self._allocated_uncached_keys.update(new_keys)
+        added = len(new_keys)
+        if self.hard_call_cap:
+            self._allocated_call_limit = min(
+                self.hard_call_cap,
+                max(self._call_count, self._allocated_call_limit + added),
+            )
+        else:
+            self._allocated_call_limit = max(
+                self._call_count,
+                self._allocated_call_limit + added,
+            )
+        self.call_budget = self._allocated_call_limit
+        if self._metrics is not None:
+            self._metrics.amap_budget_call_hard_cap = self.hard_call_cap
+            self._metrics.amap_budget_call_limit = self._allocated_call_limit
+            self._metrics.amap_budget_unique_uncached_allocated_leg_count = len(
+                self._allocated_uncached_keys
+            )
+        return added
+
+    def _effective_call_limit(self) -> int:
+        if self._allocation_started:
+            return self._allocated_call_limit
+        return self.hard_call_cap
+
+    def _raise_call_budget_exceeded(self) -> None:
+        limit = self._effective_call_limit()
+        if self._metrics is not None:
+            self._metrics.amap_budget_call_exceeded_count += 1
+            self._metrics.amap_budget_exceeded_count += 1
+        raise RouteProviderBudgetExceededError(
+            f"Amap route call budget exceeded: {limit}"
+        )
+
+    def _raise_time_budget_exceeded(self) -> None:
+        if self._metrics is not None:
+            limit_ms = self._metrics.amap_budget_time_effective_limit_ms
+            self._metrics.amap_budget_time_exceeded_count += 1
+            self._metrics.amap_budget_exceeded_count += 1
+        elif self._deadline_monotonic is not None:
+            limit_ms = max(
+                0,
+                int(
+                    (self._deadline_monotonic - self._wall_start_monotonic) * 1000
+                ),
+            )
+        else:
+            limit_ms = self.time_budget_ms
+        raise RouteProviderBudgetExceededError(
+            f"Amap route time budget exceeded: {limit_ms}ms"
+        )
+
+    def _remaining_wall_seconds(self) -> float | None:
+        deadline_monotonic = getattr(self, "_deadline_monotonic", None)
+        if deadline_monotonic is None:
+            return None
+        return deadline_monotonic - time.monotonic()
+
+    def _assert_amap_budget_available(self) -> None:
+        if self._allocation_started:
+            if self._call_count >= self._allocated_call_limit:
+                self._raise_call_budget_exceeded()
+        elif self.hard_call_cap and self._call_count >= self.hard_call_cap:
+            self._raise_call_budget_exceeded()
+        if (
+            self._deadline_monotonic is not None
+            and time.monotonic() >= self._deadline_monotonic
+        ):
+            self._raise_time_budget_exceeded()
+
+    async def _reserve_amap_call(
+        self,
+        effective_mode: EffectiveCommuteMode,
+    ) -> float:
         async with self._budget_lock:
             self._assert_amap_budget_available()
-            wait_seconds = (
-                self._last_request_started + self.min_interval - time.monotonic()
+            wait_seconds = await _PROCESS_WIDE_AMAP_RATE_LIMITER.wait_for_slot(
+                scope=(self.api_generation, effective_mode),
+                min_interval=self.min_interval,
+                deadline_monotonic=self._deadline_monotonic,
             )
-            wait_seconds = max(0.0, wait_seconds)
-            projected_wait_ms = int(wait_seconds * 1000)
-            if (
-                self.time_budget_ms
-                and self._http_elapsed_ms + projected_wait_ms >= self.time_budget_ms
-            ):
-                if self._metrics is not None:
-                    self._metrics.amap_budget_time_exceeded_count += 1
-                    self._metrics.amap_budget_exceeded_count += 1
-                raise RouteProviderBudgetExceededError(
-                    f"Amap route time budget exceeded: {self.time_budget_ms}ms"
-                )
-            if wait_seconds > 0:
-                if self._metrics is not None:
-                    self._metrics.amap_wait_ms += projected_wait_ms
-                await asyncio.sleep(wait_seconds)
-                self._http_elapsed_ms += projected_wait_ms
-            self._last_request_started = time.monotonic()
+            if wait_seconds is None:
+                self._raise_time_budget_exceeded()
+            if self._metrics is not None:
+                self._metrics.amap_wait_ms += int(wait_seconds * 1000)
+            self._assert_amap_budget_available()
             self._call_count += 1
             if self._metrics is not None:
                 self._metrics.amap_call_count += 1
             return time.monotonic()
-
-    def _record_amap_call_elapsed(self, started: float) -> None:
-        self._http_elapsed_ms += int((time.monotonic() - started) * 1000)
 
     async def _fetch_http_route(
         self,
@@ -1640,20 +2068,41 @@ class AmapRouteProvider:
                 "key": self.api_key,
                 "origin": f"{origin.longitude},{origin.latitude}",
                 "destination": f"{destination.longitude},{destination.latitude}",
-                "show_fields": (
-                    "cost,polyline" if effective_mode == "driving" else "cost"
-                ),
+                "show_fields": "cost,polyline",
             }
             if effective_mode == "transit":
                 params.update({"city1": citycode, "city2": citycode})
+        request_timeout = float(self.timeout)
+        remaining = self._remaining_wall_seconds()
+        if remaining is not None:
+            if remaining <= 0:
+                self._raise_time_budget_exceeded()
+            request_timeout = min(request_timeout, remaining)
         try:
-            response = await self._client.get(
-                url,
-                params=params,
-                timeout=self.timeout,
+            response = await asyncio.wait_for(
+                self._client.get(
+                    url,
+                    params=params,
+                    timeout=request_timeout,
+                ),
+                timeout=request_timeout,
             )
             response.raise_for_status()
             payload = response.json()
+        except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
+            remaining_after = self._remaining_wall_seconds()
+            wall_bound_timeout = remaining is not None and remaining < float(
+                self.timeout
+            )
+            wall_deadline_reached = (
+                remaining_after is not None and remaining_after <= 0
+            )
+            if wall_bound_timeout or wall_deadline_reached:
+                try:
+                    self._raise_time_budget_exceeded()
+                except RouteProviderBudgetExceededError as budget_exc:
+                    raise budget_exc from exc
+            raise RouteProviderError("Amap route API request failed") from exc
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 429:
                 message = "Amap route API HTTP 429 rate limit"
@@ -1727,18 +2176,29 @@ class AmapRouteProvider:
             captured_at=captured_at,
             observed_at=captured_at,
         )
+        if effective_mode in {"driving", "walking", "cycling"}:
+            encoded_polyline = self._flatten_step_polyline(path)
+        elif effective_mode == "transit":
+            encoded_polyline = self._flatten_transit_polyline(path)
+        else:
+            encoded_polyline = ""
         return PreciseRoute(
             distance_meters=distance,
             duration_minutes=duration,
-            encoded_polyline=(
-                self._flatten_step_polyline(path)
-                if effective_mode == "driving"
-                else ""
-            ),
+            encoded_polyline=encoded_polyline,
             transit_steps=transit_steps,
             transit_detail_quality=transit_detail_quality,
             fare_observation=fare_result.selected,
         )
+
+    async def route_access(self, **kwargs) -> PreciseRoute:
+        """Coordinate-only lodging transport, sharing this provider's global budget."""
+        origin, destination = kwargs["origin"], kwargs["destination"]
+        if (origin.place_id == 0) == (destination.place_id == 0):
+            raise RouteProviderError("access requires exactly one coordinate-only endpoint")
+        if min(origin.place_id, destination.place_id) < 0:
+            raise RouteProviderError("access POI endpoint must have a positive canonical ID")
+        return await self.route(**kwargs)
 
     async def route(
         self,
@@ -1776,7 +2236,7 @@ class AmapRouteProvider:
         )
         if cached is not None:
             return cached
-        started = await self._reserve_amap_call()
+        await self._reserve_amap_call(effective_mode)
         try:
             route = await self._fetch_http_route(
                 origin=origin,
@@ -1787,8 +2247,6 @@ class AmapRouteProvider:
             )
         except RouteProviderError:
             raise
-        finally:
-            self._record_amap_call_elapsed(started)
         await self._store_cache(
             origin=origin,
             destination=destination,
@@ -3434,7 +3892,14 @@ def _route_day_invariant_violations(
     violations = []
     seen_place_ids: set[int] = set()
     for day_group in day_groups:
-        if not min_places <= len(day_group.places) <= max_places:
+        admitted_single = (
+            len(day_group.places) == 1
+            and day_group.day_feasibility is not None
+            and day_group.day_feasibility.feasible
+            and day_group.day_feasibility.singleton_eligible
+            and day_group.day_feasibility.ordered_place_ids == [day_group.places[0].place_id]
+        )
+        if not admitted_single and not min_places <= len(day_group.places) <= max_places:
             violations.append(
                 f"day {day_group.day} place count is out of bounds"
             )
@@ -3788,9 +4253,14 @@ def _choose_anchor_aware_chunks(
     anchor_chunks: list[tuple[str | None, list[CandidatePlace]]],
     *,
     target_days: int,
+    required_anchor_ids: set[int] | None = None,
 ) -> list[tuple[str | None, list[CandidatePlace]]]:
     if not anchor_chunks:
-        return normal_chunks
+        return [] if required_anchor_ids is not None else normal_chunks
+    if required_anchor_ids is not None:
+        # Selection membership may bypass later legacy trimming only when its
+        # chunks came through the feasibility-checking anchor builder.
+        return anchor_chunks
     normal_complete = len(normal_chunks) >= target_days
     anchor_complete = len(anchor_chunks) >= target_days
     if normal_complete and not anchor_complete:
@@ -3930,6 +4400,7 @@ def _build_anchor_seed_chunks(
     request: TripRequest,
     target_places: int | None = None,
     accommodation_coord: tuple[float, float] | None = None,
+    must_supplement_pool: list[CandidatePlace] | None = None,
 ) -> list[tuple[str | None, list[CandidatePlace]]]:
     retained: list[tuple[str | None, list[CandidatePlace]]] = []
     used_ids = {
@@ -3946,7 +4417,10 @@ def _build_anchor_seed_chunks(
         max_places,
         target_places
         if target_places is not None
-        else (4 if _relaxed_preference_active(request) else max_places),
+        else _effective_route_places_per_day_capacity(
+            request,
+            max_places=max_places,
+        ),
     )
     for seed in seeds:
         day = len(retained) + 1
@@ -3965,6 +4439,24 @@ def _build_anchor_seed_chunks(
                 request=request,
                 accommodation_coord=accommodation_coord,
             )
+            if addition is None and any(place.must_include for place in current):
+                # Try qualified partners before a short required seed is lost.
+                # Ordinary seeds retain the old admission and filling path.
+                addition = _best_anchor_day_addition(
+                    current,
+                    [
+                        place for place in (must_supplement_pool or [])
+                        if place.place_id not in used_ids
+                    ],
+                    day=day,
+                    daily_budget=daily_budget,
+                    single_leg_max=single_leg_max,
+                    min_places=min_places,
+                    max_places=max_places,
+                    district_names=district_names,
+                    request=request,
+                    accommodation_coord=accommodation_coord,
+                )
             if addition is None:
                 break
             candidate, rebuilt = addition
@@ -4029,16 +4521,46 @@ def _anchor_aware_route_chunks(
     prefer_district_chunks: bool,
     food_focused: bool,
     accommodation_coord: tuple[float, float] | None = None,
+    required_anchor_ids: list[int] | None = None,
+    preferred_anchor_ids: list[int] | None = None,
+    must_supplement_pool: list[CandidatePlace] | None = None,
 ) -> list[tuple[str | None, list[CandidatePlace]]]:
-    anchors = _route_anchor_places(request, candidates)
+    if preferred_anchor_ids is not None:
+        candidates_by_id = {candidate.place_id: candidate for candidate in candidates}
+        anchors = [
+            candidates_by_id[place_id]
+            for place_id in preferred_anchor_ids
+            if place_id in candidates_by_id
+            and _has_coordinates(candidates_by_id[place_id])
+        ]
+    elif required_anchor_ids is None:
+        anchors = _route_anchor_places(request, candidates)
+    else:
+        candidates_by_id = {candidate.place_id: candidate for candidate in candidates}
+        anchors = [
+            candidates_by_id[place_id]
+            for place_id in required_anchor_ids
+            if place_id in candidates_by_id
+            and _has_coordinates(candidates_by_id[place_id])
+        ]
     if days < 1 or not anchors:
         return []
+
+    seed_max_places = max_places
+    if preferred_anchor_ids is not None and len(anchors) >= days * min_places:
+        # Ranked selection owns one complete structure. Avoid greedily filling
+        # early colocated days to the global maximum when the same admitted
+        # set can deterministically cover every requested day.
+        seed_max_places = min(
+            max_places,
+            max(min_places, math.ceil(len(anchors) / days)),
+        )
 
     seeds: list[list[CandidatePlace]] = []
     for anchor in anchors:
         choices = []
         for index, seed in enumerate(seeds):
-            if len(seed) >= max_places:
+            if len(seed) >= seed_max_places:
                 continue
             places = [*seed, anchor]
             if len(places) >= min_places and _anchor_day_group_from_places(
@@ -4077,6 +4599,7 @@ def _anchor_aware_route_chunks(
         district_names=district_names,
         request=request,
         accommodation_coord=accommodation_coord,
+        must_supplement_pool=must_supplement_pool,
     )
     if not anchor_chunks:
         return []
@@ -4086,6 +4609,10 @@ def _anchor_aware_route_chunks(
         for _, chunk in anchor_chunks
         for place in chunk
     }
+    if required_anchor_ids is not None and not set(required_anchor_ids).issubset(
+        assigned_ids
+    ):
+        return anchor_chunks
     remaining = [
         candidate for candidate in candidates
         if candidate.place_id not in assigned_ids
@@ -4094,7 +4621,10 @@ def _anchor_aware_route_chunks(
     if remaining_days:
         filler_max_places = min(
             max_places,
-            4 if _relaxed_preference_active(request) else max_places,
+            _effective_route_places_per_day_capacity(
+                request,
+                max_places=max_places,
+            ),
         )
         if prefer_district_chunks:
             filler_chunks = _district_chunks(
@@ -4217,22 +4747,35 @@ def _supplement_chunk_from_pool(
     return current
 
 
-def build_group_route_plan(
+def _build_candidate_route_plan(
     *,
     request: TripRequest,
-    group: CandidateGroup,
+    label: str,
+    route_candidates: list[CandidatePlace],
     district_names: dict[str, str] | None = None,
     district_data_available: bool = True,
     supplement_pool: list[CandidatePlace] | None = None,
     accommodation_coord: tuple[float, float] | None = None,
+    required_anchor_ids: list[int] | None = None,
+    preferred_anchor_ids: list[int] | None = None,
+    must_supplement_pool: list[CandidatePlace] | None = None,
 ) -> RoutePlan:
     """Build one deterministic route plan without external route API calls."""
     settings = get_settings()
+    selected_route_mode = preferred_anchor_ids is not None
+    daily_place_capacity = (
+        _effective_route_places_per_day_capacity(
+            request,
+            max_places=settings.route_places_per_day_max,
+        )
+        if selected_route_mode
+        else settings.route_places_per_day_max
+    )
     days = max(1, request.days)
     route_generation_mode, _ = generation_base_mode(request, settings)
     daily_budget = daily_commute_budget_minutes(request, settings)
     single_leg_max = single_leg_max_minutes(route_generation_mode, settings)
-    all_candidates = list(group.candidates)
+    all_candidates = list(route_candidates)
     located_candidates = [
         candidate for candidate in all_candidates
         if _has_coordinates(candidate)
@@ -4258,15 +4801,41 @@ def build_group_route_plan(
         for candidate in candidates
     )
     has_districts = all(candidate.adcode for candidate in candidates)
-    planning_candidates, remote_chunks = _split_remote_day_trips(
-        candidates,
-        days=days,
-        remote_context=" ".join([
-            request.to_city,
-            *request.preferences,
-            request.notes,
-        ]),
-        accommodation_coord=accommodation_coord,
+    if selected_route_mode:
+        # Selected membership must use one feasibility-checked admission path.
+        # Legacy remote pre-splitting can create an over-capacity day before
+        # required anchors are considered.
+        planning_candidates = candidates
+        remote_chunks: list[tuple[str | None, list[CandidatePlace]]] = []
+    else:
+        planning_candidates, remote_chunks = _split_remote_day_trips(
+            candidates,
+            days=days,
+            remote_context=" ".join([
+                request.to_city,
+                *request.preferences,
+                request.notes,
+            ]),
+            accommodation_coord=accommodation_coord,
+        )
+    planning_candidate_ids = {
+        candidate.place_id for candidate in planning_candidates
+    }
+    urban_required_anchor_ids = (
+        [
+            place_id for place_id in required_anchor_ids
+            if place_id in planning_candidate_ids
+        ]
+        if selected_route_mode
+        else None
+    )
+    urban_preferred_anchor_ids = (
+        [
+            place_id for place_id in preferred_anchor_ids
+            if place_id in planning_candidate_ids
+        ]
+        if selected_route_mode
+        else None
     )
     urban_days = max(0, days - len(remote_chunks))
     route_quality_enabled = bool(
@@ -4276,17 +4845,17 @@ def build_group_route_plan(
         urban_chunks = _district_chunks(
             planning_candidates,
             days=urban_days,
-            max_places=settings.route_places_per_day_max,
+            max_places=daily_place_capacity,
             accommodation_coord=accommodation_coord,
         )
-        if route_quality_enabled:
+        if route_quality_enabled or urban_preferred_anchor_ids:
             urban_chunks = _choose_anchor_aware_chunks(
                 urban_chunks,
                 _anchor_aware_route_chunks(
                     planning_candidates,
                     request=request,
                     days=urban_days,
-                    max_places=settings.route_places_per_day_max,
+                    max_places=daily_place_capacity,
                     daily_budget=daily_budget,
                     single_leg_max=single_leg_max,
                     min_places=settings.route_places_per_day_min,
@@ -4294,8 +4863,16 @@ def build_group_route_plan(
                     prefer_district_chunks=True,
                     food_focused=_food_focused(request.preferences),
                     accommodation_coord=accommodation_coord,
+                    required_anchor_ids=urban_required_anchor_ids,
+                    preferred_anchor_ids=urban_preferred_anchor_ids,
+                    must_supplement_pool=must_supplement_pool,
                 ),
                 target_days=urban_days,
+                required_anchor_ids=(
+                    set(urban_required_anchor_ids)
+                    if urban_required_anchor_ids is not None
+                    else None
+                ),
             )
         raw_chunks = [*remote_chunks, *urban_chunks]
         optimized = True
@@ -4304,19 +4881,19 @@ def build_group_route_plan(
         urban_chunks = _coordinate_chunks(
             planning_candidates,
             days=urban_days,
-            max_places=settings.route_places_per_day_max,
+            max_places=daily_place_capacity,
             generation_mode=route_generation_mode,
             food_focused=_food_focused(request.preferences),
             accommodation_coord=accommodation_coord,
         )
-        if route_quality_enabled:
+        if route_quality_enabled or urban_preferred_anchor_ids:
             urban_chunks = _choose_anchor_aware_chunks(
                 urban_chunks,
                 _anchor_aware_route_chunks(
                     planning_candidates,
                     request=request,
                     days=urban_days,
-                    max_places=settings.route_places_per_day_max,
+                    max_places=daily_place_capacity,
                     daily_budget=daily_budget,
                     single_leg_max=single_leg_max,
                     min_places=settings.route_places_per_day_min,
@@ -4324,8 +4901,16 @@ def build_group_route_plan(
                     prefer_district_chunks=False,
                     food_focused=_food_focused(request.preferences),
                     accommodation_coord=accommodation_coord,
+                    required_anchor_ids=urban_required_anchor_ids,
+                    preferred_anchor_ids=urban_preferred_anchor_ids,
+                    must_supplement_pool=must_supplement_pool,
                 ),
                 target_days=urban_days,
+                required_anchor_ids=(
+                    set(urban_required_anchor_ids)
+                    if urban_required_anchor_ids is not None
+                    else None
+                ),
             )
         raw_chunks = [*remote_chunks, *urban_chunks]
         optimized = True
@@ -4334,7 +4919,7 @@ def build_group_route_plan(
         raw_chunks = _fallback_chunks(
             planning_candidates,
             days=urban_days,
-            max_places=settings.route_places_per_day_max,
+            max_places=daily_place_capacity,
         )
         raw_chunks = [*remote_chunks, *raw_chunks]
         optimized = False
@@ -4347,10 +4932,9 @@ def build_group_route_plan(
         for place in chunk
     }
     if supplement_pool and optimized:
-        supplement_target = (
-            SUPPLEMENT_TARGET_RELAXED
-            if _relaxed_preference_active(request)
-            else SUPPLEMENT_TARGET_NORMAL
+        supplement_target = _effective_route_places_per_day_capacity(
+            request,
+            max_places=daily_place_capacity,
         )
         supplemented_chunks = []
         for adcode, chunk in raw_chunks:
@@ -4377,6 +4961,7 @@ def build_group_route_plan(
         )
     } | initial_dropped_ids
     for adcode, chunk in raw_chunks:
+        preserve_selected_membership = selected_route_mode
         if optimized:
             kept, dropped = _trim_to_budget(
                 chunk,
@@ -4387,31 +4972,29 @@ def build_group_route_plan(
                 accommodation_coord=accommodation_coord,
             )
         else:
-            kept = chunk[: settings.route_places_per_day_max]
+            kept = chunk[:daily_place_capacity]
             dropped = [
                 place.place_id
-                for place in chunk[settings.route_places_per_day_max:]
+                for place in chunk[daily_place_capacity:]
             ]
         dropped_ids.update(dropped)
         if len(kept) < settings.route_places_per_day_min:
             dropped_ids.update(place.place_id for place in kept)
             continue
 
-        # Balance types within the day
-        kept = balance_day_types(kept, request.preferences)
-
-        # v0.6.5: Enforce weight budget to prevent overloaded days
-        kept = enforce_day_weight_budget(kept, request=request)
-
-        # Validate time budget
-        while (
-            not validate_day_time_budget(kept, request=request)
-            and len(kept) > settings.route_places_per_day_min
-        ):
-            # Remove the lowest-scoring place without disturbing route order.
-            kept, removed_id = _drop_lowest_scoring_place(kept)
-            if removed_id is not None:
-                dropped_ids.add(removed_id)
+        if not preserve_selected_membership:
+            # Legacy grouped routes retain their historical type/weight/time
+            # trimming. Selected chunks were already proven feasible by the
+            # anchor builder and must not lose admitted membership here.
+            kept = balance_day_types(kept, request.preferences)
+            kept = enforce_day_weight_budget(kept, request=request)
+            while (
+                not validate_day_time_budget(kept, request=request)
+                and len(kept) > settings.route_places_per_day_min
+            ):
+                kept, removed_id = _drop_lowest_scoring_place(kept)
+                if removed_id is not None:
+                    dropped_ids.add(removed_id)
 
         if len(kept) < settings.route_places_per_day_min:
             dropped_ids.update(place.place_id for place in kept)
@@ -4421,8 +5004,9 @@ def build_group_route_plan(
         food_intensity = detect_food_intensity(request.preferences)
         kept = arrange_places_with_meal_slots(kept, food_intensity)
         if not any(not is_food_place(place) for place in kept):
-            dropped_ids.update(place.place_id for place in kept)
-            continue
+            if not preserve_selected_membership:
+                dropped_ids.update(place.place_id for place in kept)
+                continue
         kept = _finalize_last_stop(kept, accommodation_coord)
 
         # v0.9.7 Track B: Re-apply geographic ordering after balance/budget/meal
@@ -4461,14 +5045,14 @@ def build_group_route_plan(
         daily_budget=daily_budget,
         single_leg_max=single_leg_max,
         min_places=settings.route_places_per_day_min,
-        max_places=settings.route_places_per_day_max,
+        max_places=daily_place_capacity,
         district_names=district_names,
         request=request,
         accommodation_coord=accommodation_coord,
     )
 
     # Keep every optimized day useful without crossing district boundaries.
-    if optimized:
+    if optimized and not selected_route_mode:
         assigned_ids = {
             place.place_id
             for day_group in day_groups
@@ -4702,7 +5286,7 @@ def build_group_route_plan(
         daily_budget=daily_budget,
         single_leg_max=single_leg_max,
         min_places=settings.route_places_per_day_min,
-        max_places=settings.route_places_per_day_max,
+        max_places=daily_place_capacity,
         district_names=district_names,
         request=request,
         accommodation_coord=accommodation_coord,
@@ -4715,7 +5299,7 @@ def build_group_route_plan(
         daily_budget=daily_budget,
         single_leg_max=single_leg_max,
         min_places=settings.route_places_per_day_min,
-        max_places=settings.route_places_per_day_max,
+        max_places=daily_place_capacity,
         district_names=district_names,
         request=request,
         accommodation_coord=accommodation_coord,
@@ -4728,13 +5312,11 @@ def build_group_route_plan(
         day_groups,
         optimized=optimized,
         min_places=settings.route_places_per_day_min,
-        max_places=settings.route_places_per_day_max,
+        max_places=daily_place_capacity,
         request=request,
     )
     if violations:
-        raise RuntimeError(
-            "route plan invariant violation: " + "; ".join(violations)
-        )
+        raise RoutePlanInvariantError(violations, day_groups)
     assigned_ids = {
         place.place_id
         for day_group in day_groups
@@ -4749,12 +5331,670 @@ def build_group_route_plan(
         fallback_reason = "insufficient_daytime_coverage"
 
     return RoutePlan(
-        label=group.label,
+        label=label,
         day_groups=day_groups,
         dropped_place_ids=sorted(dropped_ids),
         optimized=optimized,
         fallback_reason=fallback_reason,
     )
+
+
+def build_group_route_plan(
+    *,
+    request: TripRequest,
+    group: CandidateGroup,
+    district_names: dict[str, str] | None = None,
+    district_data_available: bool = True,
+    supplement_pool: list[CandidatePlace] | None = None,
+    accommodation_coord: tuple[float, float] | None = None,
+) -> RoutePlan:
+    """Historical grouped-route compatibility entrypoint."""
+    return _build_candidate_route_plan(
+        request=request,
+        label=group.label,
+        route_candidates=list(group.candidates),
+        district_names=district_names,
+        district_data_available=district_data_available,
+        supplement_pool=supplement_pool,
+        accommodation_coord=accommodation_coord,
+    )
+
+
+def _selection_temporally_unschedulable(
+    candidate: CandidatePlace,
+    request: TripRequest,
+) -> bool:
+    return (
+        _suppress_evening_markers(request)
+        and _is_evening_marked(candidate)
+        and not _is_daytime_marked(candidate)
+    )
+
+
+def _selection_hard_ineligible(
+    candidate: CandidatePlace,
+    request: TripRequest,
+) -> bool:
+    return not _has_coordinates(candidate) or not _is_core_route_slot_candidate(
+        candidate,
+        request=request,
+    )
+
+
+_SELECTION_STRUCTURE_VIOLATION = re.compile(
+    r"^day \d+ has no (?:daytime )?activity$"
+)
+
+
+def _repairable_selection_structure_error(
+    error: RoutePlanInvariantError,
+) -> bool:
+    return bool(error.violations) and all(
+        _SELECTION_STRUCTURE_VIOLATION.fullmatch(violation)
+        for violation in error.violations
+    )
+
+
+def _selection_structure_gaps(
+    day_groups: list[RouteDayGroup] | tuple[RouteDayGroup, ...],
+    *,
+    request: TripRequest,
+) -> list[str | None]:
+    gaps: list[str | None] = [
+        day_group.adcode
+        for day_group in day_groups
+        if not any(
+            _is_daytime_activity(place, request=request)
+            for place in day_group.places
+        )
+    ]
+    gaps.extend([None] * max(0, request.days - len(day_groups)))
+    return gaps
+
+
+def _close_selection_ledger(
+    plan: RoutePlan,
+    *,
+    selection: PoiSelectionResult,
+    candidates_by_id: dict[int, CandidatePlace],
+    supplement_reasons: dict[int, str],
+    selected_drop_reasons: dict[int, str],
+    request: TripRequest,
+) -> RouteMembershipLedger:
+    selected_ids = [item.place_id for item in selection.selected]
+    selected_id_set = set(selected_ids)
+    used_ids = {
+        place.place_id
+        for day_group in plan.day_groups
+        for place in day_group.places
+    }
+    unknown_used_ids = used_ids - selected_id_set - set(supplement_reasons)
+    if unknown_used_ids:
+        raise RuntimeError(
+            "route used places without a closed supplement predicate: "
+            f"{sorted(unknown_used_ids)}"
+        )
+    wrongly_used_dropped_ids = used_ids.intersection(selected_drop_reasons)
+    if wrongly_used_dropped_ids:
+        raise RuntimeError(
+            "route used selected places that deterministic admission dropped: "
+            f"{sorted(wrongly_used_dropped_ids)}"
+        )
+    dispositions: list[SelectedRouteMembership] = []
+    for place_id in selected_ids:
+        if place_id in used_ids:
+            dispositions.append(
+                SelectedRouteMembership(place_id=place_id, status="USED")
+            )
+            continue
+        reason = selected_drop_reasons.get(place_id)
+        if reason is None:
+            candidate = candidates_by_id[place_id]
+            raise RuntimeError(
+                "admitted selected place disappeared without an allowed predicate: "
+                f"{candidate.place_id}"
+            )
+        dispositions.append(
+            SelectedRouteMembership(
+                place_id=place_id,
+                status="DROPPED",
+                reason=reason,
+            )
+        )
+    ledger = RouteMembershipLedger(
+        selected_place_ids=selected_ids,
+        selected=dispositions,
+        supplemented=[
+            QualifiedRouteSupplement(place_id=place_id, reason=reason)
+            for place_id, reason in supplement_reasons.items()
+            if place_id in used_ids
+        ],
+    )
+    plan.membership_ledger = ledger
+    plan.dropped_place_ids = sorted(
+        item.place_id for item in ledger.selected if item.status == "DROPPED"
+    )
+    return ledger
+
+
+def refresh_selection_membership_ledger(
+    plan: RoutePlan,
+    *,
+    selection: PoiSelectionResult,
+    qualified_pool: list[CandidatePlace],
+    request: TripRequest,
+) -> RouteMembershipLedger:
+    """Re-close the ledger after deterministic route/budget post-processing."""
+    ledger = plan.membership_ledger
+    if ledger is None:
+        raise RuntimeError("selected route is missing membership ledger")
+    return _close_selection_ledger(
+        plan,
+        selection=selection,
+        candidates_by_id={candidate.place_id: candidate for candidate in qualified_pool},
+        supplement_reasons={
+            item.place_id: item.reason for item in ledger.supplemented
+        },
+        selected_drop_reasons={
+            item.place_id: item.reason
+            for item in ledger.selected
+            if item.status == "DROPPED" and item.reason is not None
+        },
+        request=request,
+    )
+
+
+def _attempt_selected_route_plan(
+    *,
+    request: TripRequest,
+    candidates: list[CandidatePlace],
+    must_ids: list[int],
+    district_names: dict[str, str] | None,
+    district_data_available: bool,
+    accommodation_coord: tuple[float, float] | None,
+    must_supplement_pool: list[CandidatePlace] | None = None,
+) -> tuple[
+    RoutePlan | None,
+    RoutePlanInvariantError | None,
+]:
+    try:
+        plan = _build_candidate_route_plan(
+            request=request,
+            label="selection",
+            route_candidates=candidates,
+            required_anchor_ids=must_ids,
+            preferred_anchor_ids=[candidate.place_id for candidate in candidates],
+            district_names=district_names,
+            district_data_available=district_data_available,
+            supplement_pool=None,
+            accommodation_coord=accommodation_coord,
+            must_supplement_pool=must_supplement_pool,
+        )
+        day_groups = plan.day_groups
+        structure_error = None
+    except RoutePlanInvariantError as caught:
+        if not _repairable_selection_structure_error(caught):
+            raise
+        plan = None
+        day_groups = caught.day_groups
+        structure_error = caught
+    used_ids = {
+        place.place_id for day_group in day_groups for place in day_group.places
+    }
+    missing_must_ids = set(must_ids) - used_ids
+    if missing_must_ids:
+        raise RouteMustIncludeConflictError(
+            missing_must_ids,
+            "deterministic route feasibility",
+        )
+    return plan, structure_error
+
+
+def _selected_route_state(
+    plan: RoutePlan | None,
+    error: RoutePlanInvariantError | None,
+) -> tuple[RouteDayGroup, ...]:
+    if error is not None:
+        return error.day_groups
+    return tuple(plan.day_groups if plan is not None else [])
+
+
+def _selected_route_used_ids(
+    day_groups: list[RouteDayGroup] | tuple[RouteDayGroup, ...],
+) -> set[int]:
+    return {
+        place.place_id for day_group in day_groups for place in day_group.places
+    }
+
+
+def build_selected_route_plan(
+    *,
+    request: TripRequest,
+    selection: PoiSelectionResult,
+    qualified_pool: list[CandidatePlace],
+    district_names: dict[str, str] | None = None,
+    district_data_available: bool = True,
+    accommodation_coord: tuple[float, float] | None = None,
+    forced_route_drop_ids: set[int] | None = None,
+    authorized_supplement_reasons: dict[int, str] | None = None,
+    blocked_supplement_ids: set[int] | None = None,
+) -> RoutePlan:
+    """Build one route from hard musts and soft ranked Selector preferences."""
+    candidates_by_id = {candidate.place_id: candidate for candidate in qualified_pool}
+    selected_ids = [item.place_id for item in selection.selected]
+    missing_ids = [place_id for place_id in selected_ids if place_id not in candidates_by_id]
+    if missing_ids:
+        raise ValueError(f"selection contains IDs outside qualified pool: {missing_ids}")
+
+    forced_route_drop_ids = set(forced_route_drop_ids or set())
+    blocked_supplement_ids = set(blocked_supplement_ids or set())
+    selected_id_set = set(selected_ids)
+    hard_must_ids = {
+        candidate.place_id
+        for candidate in qualified_pool
+        if request.must_include and candidate.must_include
+    }
+    missing_selected_must_ids = hard_must_ids - selected_id_set
+    if missing_selected_must_ids:
+        raise RouteMustIncludeConflictError(
+            missing_selected_must_ids,
+            "resolved must-go missing from Selector result",
+        )
+
+    selected_drop_reasons: dict[int, str] = {}
+    eligible_selected: list[CandidatePlace] = []
+    for item in selection.selected:
+        candidate = candidates_by_id[item.place_id]
+        if candidate.place_id in forced_route_drop_ids:
+            if candidate.place_id in hard_must_ids:
+                raise RouteMustIncludeConflictError(
+                    {candidate.place_id},
+                    "precise route conflict cannot remove must-go",
+                )
+            selected_drop_reasons[candidate.place_id] = (
+                "ROUTE_FEASIBILITY_LIMIT"
+            )
+            continue
+        if _selection_hard_ineligible(candidate, request):
+            if candidate.place_id in hard_must_ids:
+                raise RouteMustIncludeConflictError(
+                    {candidate.place_id},
+                    "hard ineligible",
+                )
+            selected_drop_reasons[candidate.place_id] = "HARD_INELIGIBLE"
+            continue
+        if _selection_temporally_unschedulable(candidate, request):
+            if candidate.place_id in hard_must_ids:
+                raise RouteMustIncludeConflictError(
+                    {candidate.place_id},
+                    "temporally unschedulable",
+                )
+            selected_drop_reasons[candidate.place_id] = (
+                "TEMPORALLY_UNSCHEDULABLE"
+            )
+            continue
+        eligible_selected.append(candidate.model_copy(update={
+            "must_include": candidate.place_id in hard_must_ids,
+        }))
+    must_ids = [
+        candidate.place_id
+        for candidate in eligible_selected
+        if candidate.place_id in hard_must_ids
+    ]
+    eligible_selected = [
+        *[
+            candidate
+            for candidate in eligible_selected
+            if candidate.place_id in hard_must_ids
+        ],
+        *[
+            candidate
+            for candidate in eligible_selected
+            if candidate.place_id not in hard_must_ids
+        ],
+    ]
+
+    qualified_supplements = [
+        candidate
+        for candidate in qualified_pool
+        if candidate.place_id not in selected_id_set
+        and candidate.place_id not in blocked_supplement_ids
+        and not _selection_hard_ineligible(candidate, request)
+        and not _selection_temporally_unschedulable(candidate, request)
+        and not _avoid_conflicts_with_place(request, candidate)
+    ]
+    authorized_supplement_reasons = dict(authorized_supplement_reasons or {})
+    invalid_authorized_ids = (
+        set(authorized_supplement_reasons)
+        - {candidate.place_id for candidate in qualified_supplements}
+    )
+    if invalid_authorized_ids:
+        raise ValueError(
+            "authorized route supplements are outside the eligible pool: "
+            f"{sorted(invalid_authorized_ids)}"
+        )
+    accepted_supplements = [
+        candidate
+        for candidate in qualified_supplements
+        if candidate.place_id in authorized_supplement_reasons
+    ]
+    settings = get_settings()
+    trip_capacity = max(0, int(request.days)) * (
+        _effective_route_places_per_day_capacity(
+            request,
+            max_places=settings.route_places_per_day_max,
+        )
+    )
+    if len(must_ids) > trip_capacity:
+        raise RouteMustIncludeConflictError(
+            set(must_ids),
+            "resolved must-go exceeds numeric trip capacity",
+        )
+    route_candidates = [*eligible_selected, *accepted_supplements]
+    plan, structure_error = _attempt_selected_route_plan(
+        request=request,
+        candidates=route_candidates,
+        must_ids=must_ids,
+        district_names=district_names,
+        district_data_available=district_data_available,
+        accommodation_coord=accommodation_coord,
+        must_supplement_pool=[
+            candidate for candidate in qualified_supplements
+            if candidate not in accepted_supplements
+            and _is_daytime_activity(candidate, request=request)
+        ],
+    )
+    current_day_groups = _selected_route_state(plan, structure_error)
+    pre_fill_used_ids = _selected_route_used_ids(current_day_groups)
+    initial_candidate_ids = {candidate.place_id for candidate in route_candidates}
+    must_day_supplements = [
+        candidate for candidate in qualified_supplements
+        if candidate.place_id in pre_fill_used_ids - initial_candidate_ids
+    ]
+    for candidate in must_day_supplements:
+        authorized_supplement_reasons[candidate.place_id] = "FILL_MUST_INCLUDE_DAY"
+    accepted_supplements.extend(must_day_supplements)
+    route_candidates.extend(must_day_supplements)
+    eligible_ordinary = [
+        candidate
+        for candidate in eligible_selected
+        if candidate.place_id not in hard_must_ids
+    ]
+    used_ordinary_indexes = [
+        index
+        for index, candidate in enumerate(eligible_ordinary)
+        if candidate.place_id in pre_fill_used_ids
+    ]
+    last_used_ordinary_index = max(used_ordinary_indexes, default=-1)
+    pre_fill_capacity_full = len(pre_fill_used_ids) >= trip_capacity
+    pre_fill_drop_ids: set[int] = set()
+    for index, candidate in enumerate(eligible_ordinary):
+        if candidate.place_id in pre_fill_used_ids:
+            continue
+        selected_drop_reasons[candidate.place_id] = (
+            "CAPACITY_LIMIT"
+            if pre_fill_capacity_full and index > last_used_ordinary_index
+            else "ROUTE_FEASIBILITY_LIMIT"
+        )
+        pre_fill_drop_ids.add(candidate.place_id)
+    if pre_fill_drop_ids:
+        route_candidates = [
+            candidate
+            for candidate in route_candidates
+            if candidate.place_id not in pre_fill_drop_ids
+        ]
+    accepted_supplement_ids = {
+        candidate.place_id for candidate in accepted_supplements
+    }
+    disappeared_supplement_ids = (
+        accepted_supplement_ids
+        - _selected_route_used_ids(current_day_groups)
+    )
+    if disappeared_supplement_ids:
+        # Supplements are Route-owned rather than user-selected. If a rebuild
+        # can no longer place one, retire its stale authorization and let the
+        # existing bounded fill loop choose another qualified candidate.
+        blocked_supplement_ids.update(disappeared_supplement_ids)
+        for place_id in disappeared_supplement_ids:
+            authorized_supplement_reasons.pop(place_id, None)
+        accepted_supplements = [
+            candidate
+            for candidate in accepted_supplements
+            if candidate.place_id not in disappeared_supplement_ids
+        ]
+        accepted_supplement_ids.difference_update(disappeared_supplement_ids)
+        qualified_supplements = [
+            candidate
+            for candidate in qualified_supplements
+            if candidate.place_id not in disappeared_supplement_ids
+        ]
+
+    current_gaps = _selection_structure_gaps(
+        current_day_groups,
+        request=request,
+    )
+    remaining_fill_candidates = [
+        candidate
+        for candidate in qualified_supplements
+        if candidate.place_id not in accepted_supplement_ids
+        and _is_daytime_activity(candidate, request=request)
+    ]
+    while current_gaps:
+        accepted = False
+        target_day = next(
+            (
+                day_group
+                for day_group in current_day_groups
+                if not any(
+                    _is_daytime_activity(place, request=request)
+                    for place in day_group.places
+                )
+            ),
+            None,
+        )
+        capacity_drop_eligible_ids = (
+            _selected_route_used_ids(current_day_groups) & selected_id_set
+        )
+        ranked_fill_candidates = sorted(
+            enumerate(remaining_fill_candidates),
+            key=lambda item: (
+                0
+                if target_day is not None
+                and item[1].adcode == target_day.adcode
+                else 1,
+                item[0],
+            ),
+        )
+        pending_fill_candidates: list[CandidatePlace] = []
+        for _, candidate in ranked_fill_candidates:
+            pending_fill_candidates.append(candidate)
+            trial_candidates = [
+                *route_candidates,
+                *pending_fill_candidates,
+            ]
+            proposed_capacity_drop_ids: list[int] = []
+            while len(trial_candidates) > trip_capacity:
+                trial_candidate_ids = {
+                    place.place_id for place in trial_candidates
+                }
+                proposed_capacity_drop_id = next(
+                    (
+                        item.place_id
+                        for item in reversed(selection.selected)
+                        if item.place_id in capacity_drop_eligible_ids
+                        and item.place_id in trial_candidate_ids
+                        and item.place_id not in hard_must_ids
+                        and item.place_id not in selected_drop_reasons
+                        and item.place_id not in proposed_capacity_drop_ids
+                    ),
+                    None,
+                )
+                if proposed_capacity_drop_id is None:
+                    break
+                proposed_capacity_drop_ids.append(proposed_capacity_drop_id)
+                trial_candidates = [
+                    place
+                    for place in trial_candidates
+                    if place.place_id != proposed_capacity_drop_id
+                ]
+            if len(trial_candidates) > trip_capacity:
+                pending_fill_candidates.pop()
+                continue
+            if target_day is not None:
+                trial_by_id = {
+                    place.place_id: place for place in trial_candidates
+                }
+                ordered_trial: list[CandidatePlace] = []
+                ordered_ids: set[int] = set()
+                for day_group in current_day_groups:
+                    for place in day_group.places:
+                        if (
+                            place.place_id in trial_by_id
+                            and place.place_id not in ordered_ids
+                        ):
+                            ordered_trial.append(trial_by_id[place.place_id])
+                            ordered_ids.add(place.place_id)
+                for place in trial_candidates:
+                    if (
+                        place.place_id != candidate.place_id
+                        and place.place_id not in ordered_ids
+                    ):
+                        ordered_trial.append(place)
+                        ordered_ids.add(place.place_id)
+                target_ids = [
+                    place.place_id
+                    for place in target_day.places
+                    if place.place_id in ordered_ids
+                ]
+                insertion_index = (
+                    next(
+                        index
+                        for index, place in enumerate(ordered_trial)
+                        if place.place_id == target_ids[-1]
+                    )
+                    if target_ids
+                    else len(ordered_trial)
+                )
+                ordered_trial.insert(insertion_index, candidate)
+                trial_candidates = ordered_trial
+            try:
+                trial_plan, trial_error = _attempt_selected_route_plan(
+                    request=request,
+                    candidates=trial_candidates,
+                    must_ids=must_ids,
+                    district_names=district_names,
+                    district_data_available=district_data_available,
+                    accommodation_coord=accommodation_coord,
+                )
+            except RouteMustIncludeConflictError:
+                pending_fill_candidates.pop()
+                continue
+            trial_day_groups = _selected_route_state(trial_plan, trial_error)
+            trial_used_ids = _selected_route_used_ids(trial_day_groups)
+            trial_gaps = _selection_structure_gaps(
+                trial_day_groups,
+                request=request,
+            )
+            pending_fill_ids = {
+                place.place_id for place in pending_fill_candidates
+            }
+            retained_current_ids = (
+                _selected_route_used_ids(current_day_groups)
+                - set(proposed_capacity_drop_ids)
+            )
+            if (
+                not retained_current_ids.issubset(trial_used_ids)
+                or not accepted_supplement_ids.issubset(trial_used_ids)
+            ):
+                pending_fill_candidates.pop()
+                continue
+            if len(trial_gaps) < len(current_gaps):
+                if not pending_fill_ids.issubset(trial_used_ids):
+                    pending_fill_candidates.pop()
+                    continue
+            else:
+                if target_day is not None or len(trial_gaps) > len(current_gaps):
+                    pending_fill_candidates.pop()
+                elif len(pending_fill_candidates) >= (
+                    settings.route_places_per_day_min
+                ):
+                    # A missing whole day needs a minimum-size feasible seed.
+                    # Keep a bounded deterministic sliding window so an
+                    # individually unassigned fill can combine with the next
+                    # ranked fills without invoking subset/exact-cover search.
+                    pending_fill_candidates.pop(0)
+                continue
+            accepted_supplements.extend(pending_fill_candidates)
+            accepted_supplement_ids.update(
+                place.place_id for place in pending_fill_candidates
+            )
+            for proposed_capacity_drop_id in proposed_capacity_drop_ids:
+                selected_drop_reasons[proposed_capacity_drop_id] = (
+                    "CAPACITY_LIMIT"
+                )
+            for fill_candidate in pending_fill_candidates:
+                authorized_supplement_reasons[fill_candidate.place_id] = (
+                    "FILL_EMPTY_DAY"
+                )
+            route_candidates = trial_candidates
+            plan = trial_plan
+            structure_error = trial_error
+            current_day_groups = trial_day_groups
+            current_gaps = trial_gaps
+            remaining_fill_candidates = [
+                place
+                for place in remaining_fill_candidates
+                if place.place_id not in accepted_supplement_ids
+            ]
+            accepted = True
+            break
+        if not accepted:
+            if structure_error is not None:
+                raise structure_error
+            raise RuntimeError(
+                "selected route structure has no feasible qualified daytime fill"
+            )
+
+    if plan is None:
+        if structure_error is not None:
+            raise structure_error
+        raise RuntimeError("selected route planning returned no plan")
+
+    used_ids = route_plan_place_ids(plan)
+    used_ordinary_indexes = [
+        index
+        for index, candidate in enumerate(eligible_ordinary)
+        if candidate.place_id in used_ids
+    ]
+    last_used_ordinary_index = max(used_ordinary_indexes, default=-1)
+    capacity_full = len(used_ids) >= trip_capacity
+    for index, candidate in enumerate(eligible_ordinary):
+        if (
+            candidate.place_id in used_ids
+            or candidate.place_id in selected_drop_reasons
+        ):
+            continue
+        selected_drop_reasons[candidate.place_id] = (
+            "CAPACITY_LIMIT"
+            if capacity_full and index > last_used_ordinary_index
+            else "ROUTE_FEASIBILITY_LIMIT"
+        )
+
+    supplement_reasons = {
+        candidate.place_id: authorized_supplement_reasons[candidate.place_id]
+        for candidate in accepted_supplements
+        if candidate.place_id in used_ids
+    }
+
+    _close_selection_ledger(
+        plan,
+        selection=selection,
+        candidates_by_id=candidates_by_id,
+        supplement_reasons=supplement_reasons,
+        selected_drop_reasons=selected_drop_reasons,
+        request=request,
+    )
+    return plan
 
 
 def _prepend_complete_fallback_route(
@@ -5315,7 +6555,7 @@ def _multi_area_seed_chunks(
         daily_budget=daily_budget,
         single_leg_max=single_leg_max,
         min_places=min_places,
-        max_places=max_places,
+        max_places=seed_max_places,
         district_names=district_names,
         request=request,
         accommodation_coord=accommodation_coord,
@@ -5545,6 +6785,20 @@ def _nature_preference_active(request: TripRequest) -> bool:
 def _relaxed_preference_active(request: TripRequest) -> bool:
     text = " ".join([*request.preferences, *request.avoid, request.notes])
     return _contains_any(text, RELAXED_PREFERENCE_MARKERS)
+
+
+def _effective_route_places_per_day_capacity(
+    request: TripRequest,
+    *,
+    max_places: int,
+) -> int:
+    """Return the request-aware daily shape shared by admission and Route."""
+    shape_limit = (
+        SUPPLEMENT_TARGET_RELAXED
+        if _relaxed_preference_active(request)
+        else SUPPLEMENT_TARGET_NORMAL
+    )
+    return max(0, min(int(max_places), shape_limit))
 
 
 def _spatial_spread_preference_active(request: TripRequest) -> bool:
@@ -6388,6 +7642,7 @@ async def _enrich_precise_routes(
     provider: RouteProvider,
     metrics: RoutePlanningMetrics | None = None,
     accommodation_coord: tuple[float, float] | None = None,
+    known_precise_legs: dict[tuple[int, int, str], CommuteLeg] | None = None,
 ) -> None:
     settings = get_settings()
     route_generation_mode, _ = generation_base_mode(request, settings)
@@ -6399,7 +7654,8 @@ async def _enrich_precise_routes(
             "initial_incomplete",
             request.days - initial_day_count,
         )
-    known_precise_legs: dict[tuple[int, int, str], CommuteLeg] = {}
+    if known_precise_legs is None:
+        known_precise_legs = {}
     kept_days = []
     for day_group in route_plan.day_groups:
         day_rejected_for_budget = False
@@ -6415,6 +7671,8 @@ async def _enrich_precise_routes(
                 citycode=citycode,
                 generation_mode=route_generation_mode,
                 requested_commute_mode=request.commute_mode,
+                daily_budget=daily_budget,
+                single_leg_max=single_leg_max,
                 provider=provider,
                 metrics=metrics,
                 known_precise_legs=known_precise_legs,
@@ -6480,6 +7738,11 @@ async def _enrich_precise_routes(
                 ]
             else:
                 removable = list(day_group.places)
+            removable = [place for place in removable if not place.must_include]
+            if not removable:
+                # A hard required-to-required conflict cannot be solved by
+                # silently removing a user requirement.
+                break
             removed = min(
                 removable,
                 key=lambda place: (
@@ -6489,13 +7752,14 @@ async def _enrich_precise_routes(
                 ),
             )
             route_plan.dropped_place_ids.append(removed.place_id)
-            day_group.places = _nearest_neighbor(
+            day_group.places = _time_ordered_places(
                 [
                     place
                     for place in day_group.places
                     if place.place_id != removed.place_id
                 ],
-                accommodation_coord,
+                request=request,
+                accommodation_coord=accommodation_coord,
             )
         if day_rejected_for_budget and metrics is not None:
             metrics.record_precise_recovery_reason("precise_budget_rejection")
@@ -6618,6 +7882,8 @@ async def _recover_precise_route_days(
                 citycode=citycode,
                 generation_mode=route_generation_mode,
                 requested_commute_mode=request.commute_mode,
+                daily_budget=daily_budget,
+                single_leg_max=single_leg_max,
                 provider=provider,
                 metrics=metrics,
                 known_precise_legs=known_precise_legs,
@@ -6685,6 +7951,11 @@ async def _recover_precise_route_days(
                 and hard_leg.duration_minutes > single_leg_max
                 else list(recovered_day.places)
             )
+            removable = [place for place in removable if not place.must_include]
+            if not removable:
+                # A hard required-to-required conflict cannot be solved by
+                # silently removing a user requirement.
+                break
             removed = min(
                 removable,
                 key=lambda place: (
@@ -6694,13 +7965,14 @@ async def _recover_precise_route_days(
                 ),
             )
             dropped_ids.add(removed.place_id)
-            recovered_day.places = _nearest_neighbor(
+            recovered_day.places = _time_ordered_places(
                 [
                     place
                     for place in recovered_day.places
                     if place.place_id != removed.place_id
                 ],
-                accommodation_coord,
+                request=request,
+                accommodation_coord=accommodation_coord,
             )
         if recovered:
             continue
@@ -6771,6 +8043,7 @@ async def _enrich_precise_route_candidates(
     accommodation_coord: tuple[float, float] | None = None,
     candidates: list[CandidatePlace] | None = None,
     district_names: dict[str, str] | None = None,
+    known_precise_legs: dict[tuple[int, int, str], CommuteLeg] | None = None,
 ) -> list[RoutePlan]:
     if target_plan_count is None:
         target_count = len(plans)
@@ -6786,24 +8059,39 @@ async def _enrich_precise_route_candidates(
     for route_plan in plans:
         if target_plan_count is not None and selected_complete_count >= target_count:
             break
+        selected_mode = route_plan.membership_ledger is not None
+        working_plan = (
+            route_plan.model_copy(deep=True) if selected_mode else route_plan
+        )
+        original_day_place_ids = [
+            [place.place_id for place in day_group.places]
+            for day_group in route_plan.day_groups
+        ]
+        original_membership_ids = route_plan_place_ids(route_plan)
         await _preload_precise_route_cache(
             provider,
-            [route_plan],
+            [working_plan],
             city=city,
             generation_mode=route_generation_mode,
         )
-        if route_plan.optimized:
-            route_candidate_ids = {
-                *route_plan_place_ids(route_plan),
-                *route_plan.dropped_place_ids,
-            }
+        allocate = getattr(provider, "allocate_uncached_plan_calls", None)
+        if callable(allocate):
+            allocate(
+                working_plan,
+                city=city,
+                generation_mode=route_generation_mode,
+            )
+        if working_plan.optimized:
+            route_candidate_ids = route_plan_place_ids(working_plan)
+            if not selected_mode:
+                route_candidate_ids.update(working_plan.dropped_place_ids)
             scoped_candidates = [
                 candidate
                 for candidate in (candidates or [])
                 if candidate.place_id in route_candidate_ids
             ]
             await _enrich_precise_routes(
-                route_plan,
+                working_plan,
                 request=request,
                 candidates=scoped_candidates or [
                     place
@@ -6816,9 +8104,27 @@ async def _enrich_precise_route_candidates(
                 provider=provider,
                 metrics=metrics,
                 accommodation_coord=accommodation_coord,
+                known_precise_legs=known_precise_legs,
             )
-        processed.append(route_plan)
-        if _is_complete_route_plan(route_plan, request):
+        if selected_mode:
+            trial_membership_ids = route_plan_place_ids(working_plan)
+            if trial_membership_ids != original_membership_ids:
+                raise SelectedRoutePreciseConflictError(
+                    added_place_ids=(
+                        trial_membership_ids - original_membership_ids
+                    ),
+                    removed_place_ids=(
+                        original_membership_ids - trial_membership_ids
+                    ),
+                    original_day_place_ids=original_day_place_ids,
+                    trial_day_place_ids=[
+                        [place.place_id for place in day_group.places]
+                        for day_group in working_plan.day_groups
+                    ],
+                    trial_plan=working_plan,
+                )
+        processed.append(working_plan)
+        if _is_complete_route_plan(working_plan, request):
             selected_complete_count += 1
 
     if metrics is not None:
@@ -6836,6 +8142,8 @@ async def _resolve_precise_legs(
     citycode: str | None,
     generation_mode: EffectiveCommuteMode,
     requested_commute_mode: str,
+    daily_budget: int,
+    single_leg_max: int,
     provider: RouteProvider,
     metrics: RoutePlanningMetrics | None,
     known_precise_legs: dict[tuple[int, int, str], CommuteLeg] | None = None,
@@ -6894,9 +8202,7 @@ async def _resolve_precise_legs(
                 f"{origin.name} → {destination.name}："
                 f"{mode_label}预计 {precise.duration_minutes} 分钟"
             ),
-            encoded_polyline=(
-                precise.encoded_polyline if estimated.mode == "driving" else ""
-            ),
+            encoded_polyline=precise.encoded_polyline or "",
             transit_steps=(
                 list(precise.transit_steps)
                 if estimated.mode == "transit"
@@ -6944,6 +8250,40 @@ async def _resolve_precise_legs(
                 metrics.record_effective_fallback(estimated.mode)
         return estimated_legs
 
+    budget_errors = [
+        error
+        for _, _, error in results
+        if isinstance(error, RouteProviderBudgetExceededError)
+    ]
+    successful_precise_legs = [
+        leg
+        for _, leg, error in results
+        if error is None and leg.source == "amap"
+    ]
+    precise_hard_violation = (
+        any(
+            leg.duration_minutes > single_leg_max
+            for leg in successful_precise_legs
+        )
+        or sum(
+            max(0, leg.duration_minutes)
+            for leg in successful_precise_legs
+        ) > daily_budget
+    )
+    if budget_errors and not precise_hard_violation:
+        logger.warning(
+            "Amap route provider budget exhausted; using consistent "
+            "estimates for the whole day: %s",
+            budget_errors[0],
+        )
+        if metrics is not None:
+            metrics.amap_provider_budget_exhausted_count += 1
+            metrics.record_precise_recovery_reason("provider_budget_exhausted")
+            metrics.amap_fallback_count += len(estimated_legs)
+            for estimated in estimated_legs:
+                metrics.record_effective_fallback(estimated.mode)
+        return estimated_legs
+
     precise_legs: list[CommuteLeg] = []
     budget_exhaustion_recorded = False
     rate_limit_recorded = False
@@ -6957,8 +8297,8 @@ async def _resolve_precise_legs(
         if isinstance(error, RouteProviderBudgetExceededError):
             if not budget_exhaustion_recorded:
                 logger.warning(
-                    "Amap route provider budget exhausted, using estimates for "
-                    "unverified legs: %s",
+                    "Amap route provider budget exhausted after a proven "
+                    "precise hard violation; preserving mixed evidence: %s",
                     error,
                 )
             if metrics is not None:
@@ -7001,6 +8341,606 @@ async def _resolve_precise_legs(
     return precise_legs
 
 
+_ROUTE_WORKFLOW_RESERVE_SECONDS = 110.0
+
+
+# Route v2 owns one request-wide search budget and one final membership commit.
+V2_MAX_TRIALS = 24
+V2_MAX_PROPOSALS = 8
+V2_MAX_REPAIR_ROUNDS = 3
+# Changed-day previews have no provider I/O. At most three anchors per round
+# plus one improving-parent refresh: (3 + 1) * 3 * 128 = 1536 per request.
+V2_MAX_REPAIR_PREVIEWS_PER_BATCH = 128
+V2_MAX_REPAIR_PREVIEWS = 1536
+
+
+def _v2_access_key(leg, place):
+    return (leg.direction, leg.anchor_source, leg.anchor_latitude, leg.anchor_longitude,
+            place.place_id, place.latitude, place.longitude, leg.mode)
+
+
+def _v2_access_endpoints(leg, place):
+    anchor = CandidatePlace(place_id=0, name="住宿参考点", place_type="hotel",
+                            latitude=leg.anchor_latitude, longitude=leg.anchor_longitude)
+    return (anchor, place) if leg.direction == "outbound" else (place, anchor)
+
+
+def _v2_transport_plan(plan):
+    """Provider-only query graph; never used as itinerary membership or persisted."""
+    days = list(plan.day_groups)
+    for day in plan.day_groups:
+        by_id = {p.place_id: p for p in day.places}
+        for access in day.access_legs:
+            days.append(RouteDayGroup(day=len(days)+1,
+                places=list(_v2_access_endpoints(access, by_id[access.place_id]))))
+    return RoutePlan(label="provider-transport-queries", day_groups=days)
+
+
+async def _v2_resolve_access(plan, provider, known_access, attempted, *, city, citycode, deadline):
+    resolver = getattr(provider, "route_access", None)
+    if not callable(resolver):
+        return
+    for day in plan.day_groups:
+        by_id = {p.place_id: p for p in day.places}
+        for index, leg in enumerate(day.access_legs):
+            place = by_id[leg.place_id]
+            key = _v2_access_key(leg, place)
+            if key in known_access:
+                day.access_legs[index] = known_access[key].model_copy(deep=True)
+                continue
+            if key in attempted or (deadline is not None and time.monotonic() >= deadline):
+                continue
+            attempted.add(key)
+            origin, destination = _v2_access_endpoints(leg, place)
+            remaining = max(.001, deadline-time.monotonic()) if deadline is not None else 60
+            call_timeout = max(1, get_settings().amap_route_timeout)
+            try:
+                fact = await asyncio.wait_for(resolver(origin=origin, destination=destination,
+                    city=city, effective_mode=leg.mode, citycode=citycode),
+                    timeout=min(remaining, call_timeout))
+                # Treat malformed provider values as missing, never as a free journey.
+                if (not isinstance(fact.duration_minutes, int) or isinstance(fact.duration_minutes, bool)
+                        or fact.duration_minutes <= 0 or not isinstance(fact.distance_meters, int)
+                        or isinstance(fact.distance_meters, bool) or fact.distance_meters < 0):
+                    raise RouteProviderError("invalid access route values")
+            except asyncio.TimeoutError:
+                # Event-loop timers may wake slightly before monotonic deadline on
+                # Windows. A wall-budget timeout must not start another direction.
+                if deadline is not None and remaining <= call_timeout:
+                    return
+                continue
+            except RouteProviderError:
+                continue
+            precise = leg.model_copy(update={"duration_source": "amap",
+                "duration_minutes": fact.duration_minutes, "distance_meters": fact.distance_meters})
+            known_access[key] = precise
+            day.access_legs[index] = precise.model_copy(deep=True)
+
+
+def _v2_access_legs(places, request, accommodation_coord, accommodation_source, known_access=None):
+    if not places or accommodation_coord is None or not valid_coordinate(*accommodation_coord):
+        return []
+    mode, _ = generation_base_mode(request, get_settings())
+    result = []
+    for direction, place in (("outbound", places[0]), ("inbound", places[-1])):
+        # This copy is used for distance estimation only; provider queries use ID 0.
+        anchor = place.model_copy(update={"latitude": accommodation_coord[0], "longitude": accommodation_coord[1]})
+        left, right = (anchor, place) if direction == "outbound" else (place, anchor)
+        effective = resolve_leg_effective_mode(left, right, generation_mode=mode)
+        _, distance, minutes = _estimate_route_values(left, right, effective_mode=effective)
+        leg = AccessLeg(direction=direction, anchor_source=accommodation_source,
+                     anchor_latitude=accommodation_coord[0], anchor_longitude=accommodation_coord[1],
+                     place_id=place.place_id, mode=effective, duration_minutes=minutes, distance_meters=distance)
+        result.append((known_access or {}).get(_v2_access_key(leg, place), leg).model_copy(deep=True))
+    return result
+
+
+def _v2_finalize_day(day, request):
+    day.day_feasibility = evaluate_day(day.places, day.commute_legs, day.access_legs, DayContext(request, get_settings(), day.traffic_policy))
+    day.commute_minutes = day.day_feasibility.poi_commute_minutes + (day.day_feasibility.access_minutes or 0)
+    day.commute_notes = [leg.note for leg in day.commute_legs]
+    summary = access_summary(day)
+    if summary:
+        day.commute_notes.append(summary)
+
+
+def _v2_make_plan(groups, request, accommodation_coord, accommodation_source, known, coupling_context=None, anchor=None, known_access=None):
+    mode, _ = generation_base_mode(request, get_settings())
+    days = []
+    for index, places in enumerate(groups, 1):
+        legs = _legs(places, generation_mode=mode)
+        legs = [known.get((leg.from_place_id, leg.to_place_id, leg.mode), leg).model_copy(deep=True) for leg in legs]
+        day = RouteDayGroup(day=index, places=[p.model_copy(deep=True) for p in places],
+                            area=" / ".join(dict.fromkeys(p.district for p in places if p.district)),
+                            adcode=_shared_adcode(places), commute_legs=legs,
+                            access_legs=_v2_access_legs(places, request, accommodation_coord, accommodation_source, known_access),
+                            time_hints=_time_hints(places, request))
+        if coupling_context is not None:
+            from src.agents.accommodation_policy import day_policy
+            day.traffic_policy = day_policy(places, request, get_settings(), coupling_context, anchor)
+        _v2_finalize_day(day, request)
+        days.append(day)
+    return RoutePlan(label="selected-route-v2", route_policy_version=POLICY_VERSION, day_groups=days,
+        accommodation_policy_version=coupling_context.policy_version if coupling_context else None,
+        accommodation_anchor=anchor.model_copy(deep=True) if anchor else None,
+        accommodation_resolution_state=coupling_context.state if coupling_context else None)
+
+
+def _v2_quality(plan, request, selection, must_ids):
+    """Fixed interest dimensions, best ordinary preference per dimension; no count reward."""
+    ordinary = [item.place_id for item in selection.selected if item.place_id not in must_ids]
+    q = {pid: 1 - i / max(1, len(ordinary)) for i, pid in enumerate(ordinary)}
+    dimensions = preference_place_type_dimensions(request.preferences)
+    places = [p for day in plan.day_groups for p in day.places]
+    coverage = sum(any(p.place_type in types for p in places) for types in dimensions.values())
+    if dimensions:
+        preference = sum(max((q.get(p.place_id, 0) for p in places if p.place_type in types and p.place_id not in must_ids), default=0)
+                         for types in dimensions.values()) / len(dimensions)
+    else:
+        preference = sum(max((q.get(p.place_id, 0) for p in day.places
+                              if p.place_id not in must_ids and _is_multi_area_activity_place(p, request)), default=0)
+                         for day in plan.day_groups) / request.days
+    types = len({p.place_type for p in places if _is_multi_area_activity_place(p, request)})
+    over = sum(max(0, day.day_feasibility.load_minutes - day.day_feasibility.capacity_minutes) for day in plan.day_groups)
+    commute = sum(day.commute_minutes for day in plan.day_groups)
+    stable = tuple(-p.place_id for day in plan.day_groups for p in day.places)
+    if plan.accommodation_policy_version:
+        worst_access = max((sum(a.duration_minutes for a in d.access_legs) for d in plan.day_groups),default=0)
+        return coverage, preference, types, -over, -commute, -worst_access, stable, -(plan.accommodation_anchor.place_id or 0) if plan.accommodation_anchor else 0
+    return coverage, preference, types, -over, -commute, stable
+
+
+def _v2_plan_violations(plan, request, must_ids, eligible_ids, *, refresh=True):
+    ids = [p.place_id for day in plan.day_groups for p in day.places]
+    violations = []
+    if len(plan.day_groups) != request.days or [d.day for d in plan.day_groups] != list(range(1, request.days + 1)):
+        violations.append("incomplete_days")
+    if len(ids) != len(set(ids)) or not set(ids).issubset(eligible_ids):
+        violations.append("invalid_membership")
+    if not must_ids.issubset(ids):
+        violations.append("missing_must_include")
+    for day in plan.day_groups:
+        if plan.accommodation_policy_version:
+            if day.traffic_policy is None or day.traffic_policy.resolution_state != plan.accommodation_resolution_state:
+                violations.append("accommodation_policy_mismatch")
+            anchor = plan.accommodation_anchor
+            if anchor is not None:
+                expected = (anchor.suggestion.latitude, anchor.suggestion.longitude, anchor.suggestion.source)
+                if len(day.access_legs) != 2 or any(
+                    (leg.anchor_latitude, leg.anchor_longitude, leg.anchor_source) != expected for leg in day.access_legs
+                ):
+                    violations.append("locked_accommodation_mismatch")
+            elif day.access_legs or plan.accommodation_resolution_state not in {"user_unresolved", "auto_unavailable"}:
+                violations.append("missing_locked_accommodation")
+        if refresh:
+            _v2_finalize_day(day, request)
+        violations.extend(day.day_feasibility.violations)
+        evening_seen = False
+        for place in day.places:
+            evening_only = _is_evening_marked(place) and not _is_daytime_marked(place)
+            if evening_seen and daytime_activity(place):
+                violations.append("daytime_after_evening")
+            evening_seen = evening_seen or evening_only
+        if any(_selection_temporally_unschedulable(p, request) for p in day.places):
+            violations.append("temporally_unschedulable")
+        if any(p.place_id not in must_ids and _avoid_conflicts_with_place(request, p) for p in day.places):
+            violations.append("hard_avoid")
+        if any(_is_near_duplicate_pair(a, b) for a, b in itertools.combinations(day.places, 2)):
+            violations.append("near_duplicate")
+    return violations
+
+
+def _v2_search_key(plan, request, selection, must_ids, violations):
+    """Failure distance precedes preference; feasible-plan quality stays unchanged."""
+    settings = get_settings()
+    excesses = []
+    for day in plan.day_groups:
+        feasibility = day.day_feasibility
+        policy = day.traffic_policy
+        daily_limit = policy.daily_limit_minutes if policy else daily_commute_budget_minutes(request, settings)
+        excesses.extend((
+            max(0, feasibility.load_minutes - feasibility.load_limit_minutes) / feasibility.load_limit_minutes,
+            max(0, day.commute_minutes - daily_limit) / max(1, daily_limit),
+        ))
+        for legs, limits in ((day.commute_legs, policy.poi_leg_limits if policy else None),
+                             (day.access_legs, policy.access_leg_limits if policy else None)):
+            for leg in legs:
+                limit = limits[leg.mode] if limits else single_leg_max_minutes(leg.mode, settings)
+                excesses.append(max(0, leg.duration_minutes - limit) / max(1, limit))
+    return (-len(violations), -max(excesses, default=0), -sum(excesses),
+            _v2_quality(plan, request, selection, must_ids))
+
+
+def _v2_valid_key(plan, request, selection, must_ids):
+    # Ordinary estimate-backed delivery remains legal. Once a fully verified
+    # POI-commute solution exists, preference cannot replace it with fallback estimates.
+    verified = all(leg.source == "amap" for day in plan.day_groups for leg in day.commute_legs)
+    access_verified = all(len(day.access_legs) == 2 and all(leg.duration_source == "amap" for leg in day.access_legs)
+                          for day in plan.day_groups)
+    return verified, access_verified, _v2_quality(plan, request, selection, must_ids)
+
+
+def _v2_seed_groups(request, pool, selection, must_ids, singleton_ids, make_plan, deadline):
+    ranked = {item.place_id: i for i, item in enumerate(selection.selected)}
+    ordered = sorted(pool, key=lambda p: (p.place_id not in must_ids, ranked.get(p.place_id, 1000), -p.effective_score, p.place_id))
+    by_id = {p.place_id: p for p in pool}
+    groups = [[by_id[pid]] for pid in singleton_ids]
+    fixed = set(range(len(groups)))
+    groups.extend([[] for _ in range(request.days - len(groups))])
+    used = set(singleton_ids)
+    # Put remaining must-go first; extra must-go can share an ordinary day.
+    for p in [p for p in ordered if p.place_id in must_ids - used]:
+        available = [i for i in range(request.days) if i not in fixed]
+        if not available:
+            return groups
+        empty = next((i for i in available if not groups[i]), None)
+        index = empty if empty is not None else min(available, key=lambda i: (
+            sum(build_visit_profile(x).visit_minutes for x in groups[i]) + min(haversine_km(p, x) for x in groups[i]) * 3, i))
+        groups[index].append(p); used.add(p.place_id)
+    for i in range(request.days):
+        if not groups[i]:
+            p = next((p for p in ordered if p.place_id not in used and daytime_activity(p)), None)
+            if p is not None: groups[i].append(p); used.add(p.place_id)
+    # Partner selection checks full day load; it never fills ordinary_max blindly.
+    for i in range(request.days):
+        if i in fixed or not groups[i]: continue
+        for _ in range(day_slot_limit(request, get_settings()) - len(groups[i])):
+            if deadline is not None and time.monotonic() >= deadline: return groups
+            current = make_plan(groups)
+            best = None
+            for p in ordered:
+                if p.place_id in used: continue
+                if deadline is not None and time.monotonic() >= deadline: return groups
+                if any(_is_near_duplicate_pair(p, x) for x in groups[i]): continue
+                trial_groups = [list(g) for g in groups]
+                trial_groups[i] = _time_ordered_places([*groups[i], p], request=request)
+                # Proposal construction evaluates only the changed day, not another complete trial.
+                changed_day = make_plan([trial_groups[i]]).day_groups[0]
+                changed_day.day = i + 1
+                trial = current.model_copy(deep=True)
+                trial.day_groups[i] = changed_day
+                feasible = changed_day.day_feasibility.feasible
+                key = (feasible, _v2_quality(trial, request, selection, must_ids))
+                if best is None or key > best[0]: best = key, p, trial_groups[i], trial
+            if best is None: break
+            _, p, ordered_group, trial = best
+            needs_partner = len(groups[i]) < 2
+            if not needs_partner and (not trial.day_groups[i].day_feasibility.feasible or
+                                      _v2_quality(trial, request, selection, must_ids) <= _v2_quality(current, request, selection, must_ids)):
+                break
+            groups[i] = ordered_group; used.add(p.place_id)
+    return groups
+
+
+def _v2_repair_proposals(plan, request, pool, must_ids, selection, context=None):
+    """Rank bounded changed-day previews; only returned proposals become full trials."""
+    context = context or {}
+    deadline = context.get("deadline")
+    metrics = context.get("metrics")
+    groups = [list(d.places) for d in plan.day_groups]
+    eligible = {p.place_id for p in pool}
+    parent_key = tuple(tuple(p.place_id for p in g) for g in groups)
+    seen = {parent_key}
+    known = context.get("known", {
+        (leg.from_place_id, leg.to_place_id, leg.mode): leg
+        for day in plan.day_groups for leg in day.commute_legs if leg.source == "amap"})
+    def default_builder(changed):
+        # Direct helper callers keep the parent's frozen access/policy context.
+        access = next((d.access_legs[0] for d in plan.day_groups if d.access_legs), None)
+        coord = (access.anchor_latitude, access.anchor_longitude) if access else None
+        access_facts = {_v2_access_key(leg, place): leg for day in plan.day_groups
+                        for leg in day.access_legs for place in day.places
+                        if place.place_id == leg.place_id and leg.duration_source == "amap"}
+        return _v2_make_plan(changed, request, coord,
+                            access.anchor_source if access else "auto_recommended", known,
+                            known_access=access_facts)
+    builder = context.get("make_plan", default_builder)
+    parent_violations = _v2_plan_violations(plan, request, must_ids, eligible, refresh=False)
+    affected = [i for i, d in enumerate(plan.day_groups) if d.day_feasibility.violations]
+    if not affected:
+        affected = list(range(len(groups)))
+    ordinary = {i: [p for p in groups[i] if p.place_id not in must_ids] for i in affected}
+    used = {p.place_id for g in groups for p in g}
+    ranks = {s.place_id: i for i, s in enumerate(selection.selected)}
+    replacements = {}
+    for i in affected:
+        replacements[i] = sorted((p for p in pool if p.place_id not in used), key=lambda p: (
+            min((haversine_km(p, x) for x in groups[i] if x.place_id in must_ids),
+                default=min((haversine_km(p, x) for x in groups[i]), default=0)),
+            ranks.get(p.place_id, 1000), -p.effective_score, p.place_id))[:4]
+
+    def actions(i, kind):
+        if kind == "remove_optional":
+            for p in ordinary[i]:
+                updated = [list(g) for g in groups]
+                updated[i] = [x for x in updated[i] if x.place_id != p.place_id]
+                yield kind, updated
+        elif kind == "reorder":
+            if len(groups[i]) >= 2:
+                updated = [list(g) for g in groups]
+                updated[i] = list(reversed(updated[i]))
+                yield kind, updated
+        elif kind == "replace":
+            # Each replacement visits every ordinary position, not only the tail.
+            for replacement in replacements[i]:
+                for p in ordinary[i]:
+                    updated = [list(g) for g in groups]
+                    updated[i] = _time_ordered_places(
+                        [replacement if x.place_id == p.place_id else x for x in groups[i]], request=request)
+                    yield kind, updated
+        elif kind == "fill":
+            if len(groups[i]) < 2 or not any(daytime_activity(x) for x in groups[i]):
+                for replacement in replacements[i]:
+                    updated = [list(g) for g in groups]
+                    updated[i] = _time_ordered_places([*groups[i], replacement], request=request)
+                    yield kind, updated
+        else:
+            for p in ordinary[i]:
+                for j in range(len(groups)):
+                    if j == i:
+                        continue
+                    if kind == "move":
+                        updated = [list(g) for g in groups]
+                        updated[i] = [x for x in groups[i] if x.place_id != p.place_id]
+                        updated[j] = _time_ordered_places([*groups[j], p], request=request)
+                        yield kind, updated
+                    else:
+                        for other in groups[j]:
+                            if other.place_id in must_ids:
+                                continue
+                            updated = [list(g) for g in groups]
+                            updated[i] = _time_ordered_places(
+                                [other if x.place_id == p.place_id else x for x in groups[i]], request=request)
+                            updated[j] = _time_ordered_places(
+                                [p if x.place_id == other.place_id else x for x in groups[j]], request=request)
+                            yield kind, updated
+
+    # Interleave both days and action families: a long replacement pool must not
+    # consume the preview budget before any cross-day action is considered.
+    streams = [iter(actions(i, kind)) for i in affected
+               for kind in ("remove_optional", "replace", "reorder", "move", "swap", "fill")]
+    ranked = []
+    previews = 0
+    if metrics is not None:
+        metrics.route_v2_repair_batches += 1
+    while streams and previews < V2_MAX_REPAIR_PREVIEWS_PER_BATCH:
+        remaining = []
+        for stream in streams:
+            if (deadline is not None and time.monotonic() >= deadline) or (
+                metrics is not None and metrics.route_v2_local_repair_evaluations >= V2_MAX_REPAIR_PREVIEWS):
+                streams = []
+                break
+            action, updated = next(stream, (None, None))
+            if action is None:
+                continue
+            remaining.append(stream)
+            signature = tuple(tuple(p.place_id for p in g) for g in updated)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            if previews >= V2_MAX_REPAIR_PREVIEWS_PER_BATCH:
+                break
+            previews += 1
+            if metrics is not None:
+                metrics.route_v2_local_repair_evaluations += 1
+            changed = [i for i in range(len(groups)) if signature[i] != parent_key[i]]
+            trial = plan.model_copy(update={"day_groups": list(plan.day_groups)})
+            for i in changed:
+                day = builder([updated[i]]).day_groups[0]
+                day.day = i + 1
+                if context.get("make_plan") is None:
+                    day.traffic_policy = plan.day_groups[i].traffic_policy
+                    _v2_finalize_day(day, request)
+                trial.day_groups[i] = day
+            violations = _v2_plan_violations(trial, request, must_ids, eligible, refresh=False)
+            # Do not buy a shorter commute by losing a day, a must-go, or legal membership.
+            hard = set(violations) - {"load_limit", "daily_commute_limit", "single_leg_limit"}
+            if any(violations.count(v) > parent_violations.count(v) for v in hard):
+                continue
+            if "missing_must_include" in violations or "invalid_membership" in violations:
+                continue
+            new_unknown = sum((leg.from_place_id, leg.to_place_id, leg.mode) not in known
+                              for i in changed for leg in trial.day_groups[i].commute_legs)
+            ranked.append(((new_unknown == 0,
+                            _v2_search_key(trial, request, selection, must_ids, violations)), action, updated))
+        else:
+            streams = remaining
+            continue
+        break
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    # Four strongest repairs first; preserve opportunities for other action families.
+    chosen = ranked[:min(4, V2_MAX_PROPOSALS)]
+    for candidate in ranked[len(chosen):]:
+        if len(chosen) >= V2_MAX_PROPOSALS:
+            break
+        if candidate[1] not in {item[1] for item in chosen}:
+            chosen.append(candidate)
+    for candidate in ranked:
+        if len(chosen) >= V2_MAX_PROPOSALS:
+            break
+        if candidate not in chosen:
+            chosen.append(candidate)
+    return [(action, updated) for _, action, updated in chosen]
+
+
+async def _plan_routes_v2(request, retrieval, selection, pool, provider, metrics,
+                          accommodation_coord, accommodation_source, citycode, deadline, route_start, coupling_context=None):
+    settings = get_settings()
+    if selection.schema_version != "1.1":
+        raise RoutePlanInvariantError(["selector_route_version_mismatch"], [])
+    must_ids = valid_must_include_ids(request, retrieval) | {p.place_id for p in pool if p.must_include}
+    selected_ids = [s.place_id for s in selection.selected]
+    all_ids = {p.place_id for p in pool}
+    if len(selected_ids) != len(set(selected_ids)) or not set(selected_ids).issubset(all_ids) or not must_ids.issubset(selected_ids):
+        raise RoutePlanInvariantError(["invalid_selector_membership"], [])
+    pool = [p for p in pool if valid_coordinate(p.latitude,p.longitude) and not _selection_hard_ineligible(p,request)
+            and not _selection_temporally_unschedulable(p,request)
+            and (p.place_id in must_ids or not _avoid_conflicts_with_place(request,p))]
+    eligible = {p.place_id for p in pool}
+    if not must_ids.issubset(eligible):
+        raise RouteMustIncludeConflictError(must_ids - eligible, "hard_conflict")
+    known = {}
+    known_access = {}
+    attempted_access = set()
+    from src.agents.accommodation_policy import choose_options, anchor_coord
+    options = choose_options(coupling_context,pool,selection,must_ids) if coupling_context else [None]
+    def make_plan(groups, option_index=0):
+        anchor = options[option_index]
+        coord = anchor_coord(anchor) if anchor else (None if coupling_context else accommodation_coord)
+        source = anchor.suggestion.source if anchor else accommodation_source
+        return _v2_make_plan(groups,request,coord,source,known,coupling_context,anchor,known_access)
+    metrics = metrics if metrics is not None else RoutePlanningMetrics()
+    metrics.route_policy_version = POLICY_VERSION
+    metrics.route_v2_trial_count = 0
+    metrics.route_v2_local_repair_evaluations = 0
+    metrics.route_v2_repair_batches = 0
+    metrics.route_v2_repair_rounds = 0
+    own_provider = provider is None and bool(settings.amap_api_key) and settings.amap_route_enabled
+    if own_provider:
+        provider = AmapRouteProvider(mode_aware=settings.commute_mode_enabled, metrics=metrics,
+                                     deadline_monotonic=deadline, wall_start_monotonic=route_start)
+    mode,_ = generation_base_mode(request,settings)
+    best_valid = None
+    best_search = None
+    best_search_key = None
+    valid_candidates = []
+    candidate_actions = {}
+    exhausted = False
+    evaluated = set()
+    search_by_option = {}
+    option_trials = [0 for _ in options]
+    def signature_for(groups, option_index):
+        return option_index, tuple(tuple(p.place_id for p in g) for g in groups)
+    async def consider(groups, action, option_index=0):
+        nonlocal best_valid,best_search,best_search_key,exhausted
+        signature = signature_for(groups, option_index)
+        if signature in evaluated: return
+        if metrics.route_v2_trial_count >= V2_MAX_TRIALS or (deadline is not None and time.monotonic() >= deadline):
+            exhausted=True; return
+        evaluated.add(signature); metrics.route_v2_trial_count += 1
+        option_trials[option_index] += 1
+        trial=make_plan(groups, option_index)
+        # HTTP/cache owners keep their original caps across every candidate.
+        if provider is not None:
+            transport = _v2_transport_plan(trial) if callable(getattr(provider, "route_access", None)) else trial
+            await _preload_precise_route_cache(provider,[transport],city=retrieval.city,generation_mode=mode)
+            allocate=getattr(provider,"allocate_uncached_plan_calls",None)
+            if callable(allocate): allocate(transport,city=retrieval.city,generation_mode=mode)
+            await _v2_resolve_access(trial, provider, known_access, attempted_access,
+                city=retrieval.city, citycode=citycode, deadline=deadline)
+            for day in trial.day_groups:
+                if deadline is not None and time.monotonic() >= deadline: break
+                if not day.commute_legs: continue
+                remaining=max(.001,deadline-time.monotonic()) if deadline is not None else 60
+                day.commute_legs = await _resolve_precise_legs(
+                    day,day.commute_legs,city=retrieval.city,citycode=citycode,generation_mode=mode,
+                    requested_commute_mode=request.commute_mode,
+                    daily_budget=day.traffic_policy.daily_limit_minutes if day.traffic_policy else daily_commute_budget_minutes(request,settings),
+                    single_leg_max=single_leg_max_minutes(mode,settings),provider=provider,metrics=metrics,
+                    known_precise_legs=known,concurrency=settings.amap_route_enrichment_concurrency,
+                    timeout_seconds=min(remaining,max(settings.amap_route_timeout,1)*len(day.commute_legs)))
+        # Existing provider degradation may return estimates for the day: known facts still win.
+        for day in trial.day_groups:
+            day.commute_legs=[known.get((leg.from_place_id,leg.to_place_id,leg.mode),leg).model_copy(deep=True) for leg in day.commute_legs]
+        violations=_v2_plan_violations(trial,request,must_ids,eligible)
+        if not violations:
+            valid_candidates.append((option_index, trial.model_copy(deep=True)))
+            candidate_actions[signature] = action
+        if not violations and (best_valid is None or
+                _v2_valid_key(trial,request,selection,must_ids) > _v2_valid_key(best_valid,request,selection,must_ids)):
+            best_valid=trial.model_copy(deep=True)
+            metrics.route_v2_accepted_action=action
+        key=_v2_search_key(trial,request,selection,must_ids,violations)
+        if option_index not in search_by_option or key > search_by_option[option_index][0]:
+            search_by_option[option_index] = (key, trial.model_copy(deep=True))
+        if best_search_key is None or key > best_search_key:
+            best_search=trial.model_copy(deep=True);best_search_key=key
+    try:
+        ranks={s.place_id:i for i,s in enumerate(selection.selected)}
+        long_ids=[p.place_id for p in sorted(pool,key=lambda p:(p.place_id not in must_ids,ranks.get(p.place_id,1000),p.place_id))
+                  if build_visit_profile(p).singleton_eligible and (any(options) if coupling_context else accommodation_coord is not None)]
+        configs=[[]]+[long_ids[:n] for n in range(1,min(request.days,len(long_ids))+1)]
+        # Round-robin across anchors before spending repair slots on any anchor.
+        for config in configs:
+            for option_index in range(len(options)):
+                if exhausted: break
+                builder = lambda groups, i=option_index: make_plan(groups,i)
+                groups=_v2_seed_groups(request,pool,selection,must_ids,config,builder,deadline)
+                await consider(groups,"initial" if not config else "singleton_configuration",option_index)
+            if exhausted: break
+        for repair_round in range(V2_MAX_REPAIR_ROUNDS):
+            if exhausted or best_search is None: break
+            def proposals_for(i):
+                return _v2_repair_proposals(search_by_option[i][1],request,pool,must_ids,selection,{
+                    "make_plan": lambda groups: make_plan(groups,i), "known": known,
+                    "deadline": deadline, "metrics": metrics})
+            batches = {i:proposals_for(i) for i in sorted(search_by_option)}
+            if not any(batches.values()): break
+            metrics.route_v2_repair_rounds=repair_round+1
+            previous=metrics.route_v2_trial_count
+            refreshed = False
+            last_option = -1
+            for _ in range(V2_MAX_PROPOSALS):
+                # Already evaluated signatures do not consume another trial or hide later actions.
+                for i,batch in batches.items():
+                    batches[i] = [(a,g) for a,g in batch if signature_for(g,i) not in evaluated]
+                available = [i for i,batch in batches.items() if batch]
+                if not available: break
+                option_index = next((i for i in available if i > last_option), available[0])
+                last_option = option_index
+                action,groups = batches[option_index].pop(0)
+                prior_distance = search_by_option[option_index][0][:3]
+                await consider(groups,action,option_index)
+                if exhausted: break
+                # One extra batch per round, within the same eight full trials: repair
+                # newly reduced violations now instead of waiting for the next round.
+                if (not refreshed and best_valid is None
+                        and search_by_option[option_index][0][:3] > prior_distance):
+                    batches[option_index] = proposals_for(option_index)
+                    refreshed = True
+            if metrics.route_v2_trial_count==previous: break
+        exhausted = exhausted or metrics.route_v2_trial_count >= V2_MAX_TRIALS
+        # Newly learned precise facts also invalidate an earlier best if they disagree.
+        refreshed_valid = []
+        for option_index,candidate in valid_candidates:
+            refreshed = make_plan([d.places for d in candidate.day_groups], option_index)
+            if not _v2_plan_violations(refreshed, request, must_ids, eligible):
+                refreshed_valid.append(refreshed)
+        best_valid = max(refreshed_valid, key=lambda plan: _v2_valid_key(plan, request, selection, must_ids), default=None)
+        if best_valid is None and metrics.route_v2_repair_rounds >= V2_MAX_REPAIR_ROUNDS:
+            exhausted = True
+        if best_valid is None:
+            metrics.route_v2_stop_reason="search_budget_exhausted" if exhausted else "qualified_pool_exhausted"
+            raise RoutePlanInvariantError([metrics.route_v2_stop_reason],best_search.day_groups if best_search else [])
+        winning_index = next((i for i,a in enumerate(options) if a == best_valid.accommodation_anchor),0)
+        metrics.route_v2_accepted_action = candidate_actions[signature_for([d.places for d in best_valid.day_groups],winning_index)]
+        if coupling_context:
+            from src.agents.accommodation_policy import recommendation_reason
+            if best_valid.accommodation_anchor and best_valid.accommodation_anchor.suggestion.source == "auto_recommended":
+                best_valid.accommodation_anchor.suggestion.reason = recommendation_reason(best_valid)
+            metrics.accommodation_metrics.update(selected_option=winning_index, recommendation_changed=winning_index!=0)
+        used=route_plan_place_ids(best_valid)
+        by_id={p.place_id:p for p in retrieval.candidates+retrieval.route_planning_candidates}
+        _close_selection_ledger(best_valid,selection=selection,candidates_by_id=by_id,
+            supplement_reasons={pid:"REPLACE_DROPPED" for pid in used-set(selected_ids)},
+            selected_drop_reasons={pid:("HARD_INELIGIBLE" if pid not in eligible else "NOT_CHOSEN_FOR_FINAL_ROUTE")
+                                   for pid in selected_ids if pid not in used},request=request)
+        metrics.route_v2_stop_reason="best_valid_at_limit" if exhausted else "complete"
+        metrics.plan_count=1;metrics.day_count=request.days
+        metrics.commute_leg_count=sum(len(day.commute_legs) for day in best_valid.day_groups)
+        metrics.record_membership_ledger(best_valid.membership_ledger)
+        metrics.route_quality=build_route_quality_metrics(request,retrieval,[best_valid],selected_reason="route_v2_feasibility")
+        return [best_valid]
+    finally:
+        metrics.access_route_attempt_count = len(attempted_access)
+        metrics.access_route_fact_count = len(known_access)
+        if coupling_context:
+            metrics.accommodation_metrics.update(resolution_state=coupling_context.state,
+                candidate_count=len(coupling_context.anchors), evaluated_option_count=sum(n>0 for n in option_trials),
+                option_trial_counts=option_trials)
+        if own_provider: await provider.close()
+
+
 async def plan_routes(
     request: TripRequest,
     retrieval: RetrievalResult,
@@ -7009,13 +8949,42 @@ async def plan_routes(
     metrics: RoutePlanningMetrics | None = None,
     target_plan_count: int | None = None,
     accommodation_coord: tuple[float, float] | None = None,
+    workflow_deadline_monotonic: float | None = None,
+    selection: PoiSelectionResult | None = None,
+    accommodation_source: str = "auto_recommended",
+    accommodation_context=None,
 ) -> list[RoutePlan]:
-    """Plan every candidate group, then enrich final legs with Amap."""
+    """Plan one selected route, or read the historical grouped compatibility path."""
+    route_start = time.monotonic()
     settings = get_settings()
+    configured_wall_ms = max(0, int(settings.amap_route_time_budget_ms or 0))
+    route_wall_deadline = (
+        route_start + (configured_wall_ms / 1000.0)
+        if configured_wall_ms
+        else None
+    )
+    effective_deadline = route_wall_deadline
+    if workflow_deadline_monotonic is not None:
+        reserved = float(workflow_deadline_monotonic) - _ROUTE_WORKFLOW_RESERVE_SECONDS
+        if effective_deadline is None:
+            effective_deadline = reserved
+        else:
+            effective_deadline = min(effective_deadline, reserved)
+    qualified_pool = _route_planning_candidate_pool(
+        retrieval,
+        must_include_ids=valid_must_include_ids(request, retrieval),
+    )
     adcodes = {
         candidate.adcode
-        for group in retrieval.candidate_groups
-        for candidate in group.candidates
+        for candidate in (
+            qualified_pool
+            if selection is not None
+            else [
+                candidate
+                for group in retrieval.candidate_groups
+                for candidate in group.candidates
+            ]
+        )
         if candidate.adcode
     }
     district_data_available = True
@@ -7042,37 +9011,81 @@ async def plan_routes(
                 exc_info=True,
             )
 
-    wider_pool = getattr(retrieval, "route_planning_candidates", None) or []
-    plans = [
-        build_group_route_plan(
+    if settings.selector_route_v2_enabled:
+        if selection is None:
+            raise RoutePlanInvariantError(["missing_selector_v11"], [])
+        return await _plan_routes_v2(
+            request, retrieval, selection, qualified_pool, provider, metrics,
+            accommodation_coord, accommodation_source, citycode,
+            effective_deadline, route_start,
+            accommodation_context if settings.accommodation_route_coupling_enabled else None,
+        )
+    if selection is not None:
+        plans = [
+            build_selected_route_plan(
+                request=request,
+                selection=selection,
+                qualified_pool=qualified_pool,
+                district_names=district_names,
+                district_data_available=district_data_available,
+                accommodation_coord=accommodation_coord,
+            )
+        ]
+        target_plan_count = 1
+    else:
+        wider_pool = getattr(retrieval, "route_planning_candidates", None) or []
+        plans = [
+            build_group_route_plan(
+                request=request,
+                group=group,
+                district_names=district_names,
+                district_data_available=district_data_available,
+                supplement_pool=wider_pool,
+                accommodation_coord=accommodation_coord,
+            )
+            for group in retrieval.candidate_groups
+        ]
+    if selection is None:
+        for route_plan in plans:
+            normalize_route_near_duplicates(
+                route_plan,
+                request=request,
+                accommodation_coord=accommodation_coord,
+            )
+    if selection is not None and plans:
+        ledger = plans[0].membership_ledger
+        if ledger is None:
+            raise RuntimeError("selected route is missing membership ledger")
+        _close_selection_ledger(
+            plans[0],
+            selection=selection,
+            candidates_by_id={
+                candidate.place_id: candidate for candidate in qualified_pool
+            },
+            supplement_reasons={
+                item.place_id: item.reason for item in ledger.supplemented
+            },
+            selected_drop_reasons={
+                item.place_id: item.reason
+                for item in ledger.selected
+                if item.status == "DROPPED" and item.reason is not None
+            },
             request=request,
-            group=group,
+        )
+    if selection is None:
+        plans = _prepend_complete_fallback_route(
+            plans,
+            request=request,
+            retrieval=retrieval,
             district_names=district_names,
             district_data_available=district_data_available,
-            supplement_pool=wider_pool,
+            target_complete_count=target_plan_count or 1,
             accommodation_coord=accommodation_coord,
         )
-        for group in retrieval.candidate_groups
-    ]
-    for route_plan in plans:
-        normalize_route_near_duplicates(
-            route_plan,
-            request=request,
-            accommodation_coord=accommodation_coord,
-        )
-    plans = _prepend_complete_fallback_route(
-        plans,
-        request=request,
-        retrieval=retrieval,
-        district_names=district_names,
-        district_data_available=district_data_available,
-        target_complete_count=target_plan_count or 1,
-        accommodation_coord=accommodation_coord,
-    )
     previous_selected_label = _legacy_selected_route_quality_label(request, plans)
     rank_components: list[dict[str, Any]] | None = None
     route_quality_rank_evaluated = False
-    if getattr(settings, "route_quality_selection_enabled", False):
+    if selection is None and getattr(settings, "route_quality_selection_enabled", False):
         plans = _prepend_anchor_aware_route_candidate(
             plans,
             request=request,
@@ -7126,6 +9139,8 @@ async def plan_routes(
         active_provider = AmapRouteProvider(
             mode_aware=settings.commute_mode_enabled,
             metrics=metrics,
+            deadline_monotonic=effective_deadline,
+            wall_start_monotonic=route_start,
         )
     if active_provider is None:
         plans = _limit_to_target_complete_routes(
@@ -7146,23 +9161,190 @@ async def plan_routes(
                 plans,
                 accommodation_coord,
             )
+            if selection is not None and plans:
+                ledger = plans[0].membership_ledger
+                if ledger is None:
+                    raise RuntimeError("selected route is missing membership ledger")
+                metrics.record_membership_ledger(ledger)
         return plans
     try:
-        plans = await _enrich_precise_route_candidates(
-            plans,
-            request=request,
-            city=retrieval.city,
-            citycode=citycode,
-            provider=active_provider,
-            metrics=metrics,
-            target_plan_count=target_plan_count,
-            accommodation_coord=accommodation_coord,
-            candidates=_route_planning_candidate_pool(
-                retrieval,
-                must_include_ids=valid_must_include_ids(request, retrieval),
-            ),
-            district_names=district_names,
-        )
+        precise_leg_cache: dict[tuple[int, int, str], CommuteLeg] = {}
+        forced_route_drop_ids: set[int] = set()
+        blocked_supplement_ids: set[int] = set()
+        selected_id_set = {
+            item.place_id for item in selection.selected
+        } if selection is not None else set()
+        possible_reselections = sum(
+            candidate.place_id not in valid_must_include_ids(request, retrieval)
+            for candidate in qualified_pool
+            if candidate.place_id in selected_id_set
+        ) if selection is not None else 0
+        if selection is not None:
+            possible_reselections += sum(
+                candidate.place_id not in selected_id_set
+                for candidate in qualified_pool
+            )
+        # Selected membership recovery stays fail-closed, but no longer scales
+        # its retry count with the full candidate pool.
+        max_precise_reselections = min(3, possible_reselections)
+        for precise_attempt in range(max_precise_reselections + 1):
+            try:
+                plans = await _enrich_precise_route_candidates(
+                    plans,
+                    request=request,
+                    city=retrieval.city,
+                    citycode=citycode,
+                    provider=active_provider,
+                    metrics=metrics,
+                    target_plan_count=target_plan_count,
+                    accommodation_coord=accommodation_coord,
+                    candidates=_route_planning_candidate_pool(
+                        retrieval,
+                        must_include_ids=valid_must_include_ids(
+                            request,
+                            retrieval,
+                        ),
+                    ),
+                    district_names=district_names,
+                    known_precise_legs=precise_leg_cache,
+                )
+                break
+            except SelectedRoutePreciseConflictError as conflict:
+                if selection is None:
+                    raise
+                hard_must_ids = valid_must_include_ids(request, retrieval)
+                removed_ids = set(conflict.removed_place_ids)
+                ledger = plans[0].membership_ledger
+                if ledger is None:
+                    raise RuntimeError(
+                        "selected route is missing membership ledger"
+                    )
+                authorized_supplement_reasons = {
+                    item.place_id: item.reason
+                    for item in ledger.supplemented
+                }
+                retired_supplement_ids = (
+                    removed_ids & set(authorized_supplement_reasons)
+                )
+                removed_selected_ids = removed_ids & selected_id_set
+                removed_hard_must_ids = removed_selected_ids & hard_must_ids
+                structure_gaps = _selection_structure_gaps(
+                    conflict.trial_plan.day_groups,
+                    request=request,
+                )
+                if metrics is not None:
+                    metrics.amap_precise_membership_conflict_count += 1
+                    metrics.amap_precise_membership_conflict_removed_selected_count += (
+                        len(removed_selected_ids)
+                    )
+                    metrics.amap_precise_membership_conflict_structure_gap_count += int(
+                        bool(structure_gaps)
+                    )
+                if removed_hard_must_ids:
+                    raise
+                logger.warning(
+                    "Selected precise membership conflict; applying bounded "
+                    "Route-owned recovery: removed_selected_ids=%s, "
+                    "removed_supplement_ids=%s, added_place_ids=%s, "
+                    "provider_deadline_reached=%s",
+                    sorted(removed_selected_ids),
+                    sorted(retired_supplement_ids),
+                    list(conflict.added_place_ids),
+                    bool(
+                        effective_deadline is not None
+                        and time.monotonic() >= effective_deadline
+                    ),
+                )
+                existing_soft_drop_reasons = {
+                    item.place_id: item.reason
+                    for item in ledger.selected
+                    if item.status == "DROPPED" and item.reason is not None
+                }
+                if removed_selected_ids:
+                    if not structure_gaps:
+                        # Selector ordinary choices are preferences, not user
+                        # must-go facts. Close a bounded precise-route change
+                        # directly instead of rebuilding the whole trip around
+                        # the same conflict. Structural gaps still fall through
+                        # to the bounded qualified-replacement path below.
+                        for place_id in retired_supplement_ids:
+                            authorized_supplement_reasons.pop(place_id, None)
+                        for place_id in conflict.added_place_ids:
+                            if place_id not in selected_id_set:
+                                authorized_supplement_reasons[place_id] = (
+                                    "REPLACE_DROPPED"
+                                )
+                        selected_drop_reasons = {
+                            **existing_soft_drop_reasons,
+                            **{
+                                place_id: "ROUTE_FEASIBILITY_LIMIT"
+                                for place_id in removed_selected_ids
+                            },
+                        }
+                        accepted_plan = conflict.trial_plan
+                        _close_selection_ledger(
+                            accepted_plan,
+                            selection=selection,
+                            candidates_by_id={
+                                candidate.place_id: candidate
+                                for candidate in qualified_pool
+                            },
+                            supplement_reasons=authorized_supplement_reasons,
+                            selected_drop_reasons=selected_drop_reasons,
+                            request=request,
+                        )
+                        plans = [accepted_plan]
+                        if metrics is not None:
+                            metrics.amap_precise_membership_soft_accept_count += 1
+                            metrics.amap_precise_processed_plan_count = 1
+                            metrics.amap_precise_selected_complete_plan_count = int(
+                                _is_complete_route_plan(accepted_plan, request)
+                            )
+                        break
+                # A complete validated trial needs no new attempt. Only a
+                # rebuild consumes this limit, including on the final pass.
+                if precise_attempt >= max_precise_reselections:
+                    raise
+                for place_id in retired_supplement_ids:
+                    authorized_supplement_reasons.pop(place_id, None)
+                blocked_supplement_ids.update(retired_supplement_ids)
+                drop_id = next(
+                    (
+                        item.place_id
+                        for item in reversed(selection.selected)
+                        if item.place_id in removed_ids
+                        and item.place_id not in hard_must_ids
+                        and item.place_id not in forced_route_drop_ids
+                    ),
+                    None,
+                )
+                if drop_id is not None:
+                    forced_route_drop_ids.add(drop_id)
+                if drop_id is None and not retired_supplement_ids:
+                    # Added-only drift is diagnostic but cannot drive a safe
+                    # membership reduction. A repeated removed ID likewise
+                    # provides no progress, so both fail at this bounded seam.
+                    raise
+                # The Amap provider remains the owner of its original call and
+                # wall deadlines. A local membership rebuild is still safe
+                # after that deadline: cached legs remain reusable and every
+                # uncached call is rejected before HTTP, producing the existing
+                # whole-day estimate fallback without extending either budget.
+                plans = [
+                    build_selected_route_plan(
+                        request=request,
+                        selection=selection,
+                        qualified_pool=qualified_pool,
+                        district_names=district_names,
+                        district_data_available=district_data_available,
+                        accommodation_coord=accommodation_coord,
+                        forced_route_drop_ids=forced_route_drop_ids,
+                        authorized_supplement_reasons=(
+                            authorized_supplement_reasons
+                        ),
+                        blocked_supplement_ids=blocked_supplement_ids,
+                    )
+                ]
         plans = _limit_to_target_complete_routes(
             plans,
             request=request,
@@ -7171,6 +9353,26 @@ async def plan_routes(
     finally:
         if own_provider:
             await active_provider.close()
+    if selection is not None and plans:
+        ledger = plans[0].membership_ledger
+        if ledger is None:
+            raise RuntimeError("selected route is missing membership ledger")
+        _close_selection_ledger(
+            plans[0],
+            selection=selection,
+            candidates_by_id={
+                candidate.place_id: candidate for candidate in qualified_pool
+            },
+            supplement_reasons={
+                item.place_id: item.reason for item in ledger.supplemented
+            },
+            selected_drop_reasons={
+                item.place_id: item.reason
+                for item in ledger.selected
+                if item.status == "DROPPED" and item.reason is not None
+            },
+            request=request,
+        )
     if metrics is not None:
         metrics.plan_count = len(plans)
         metrics.day_count = sum(len(plan.day_groups) for plan in plans)
@@ -7184,6 +9386,11 @@ async def plan_routes(
             plans,
             accommodation_coord,
         )
+        if selection is not None and plans:
+            ledger = plans[0].membership_ledger
+            if ledger is None:
+                raise RuntimeError("selected route is missing membership ledger")
+            metrics.record_membership_ledger(ledger)
     return plans
 
 

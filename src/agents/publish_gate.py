@@ -50,6 +50,8 @@ INTERNAL_TERMS = (
     "Structural Gate",
     "route lock",
     "内部校验",
+    "[INTERNAL",
+    "写作指引，勿输出",
 )
 
 PUBLISH_FAILURE_FALLBACK_MESSAGE = (
@@ -141,6 +143,9 @@ _MEAL_ACTIVITY_MARKERS = (
     "休息",
 )
 _GENERIC_ACTIVITY_PHRASES = (
+    "按自己的节奏在这里看看走走",
+    "按自己的节奏看看走走",
+    "看看走走",
     "拍照停留",
     "停留拍照",
     "短暂停留",
@@ -1149,6 +1154,25 @@ def strip_food_markers_from_plans(
     ]
 
 
+def _validate_arrival_durations(plans, route_plans):
+    from src.agents.arrival_copy import normalize_arrival_copy
+    findings = []
+    for index, (plan, route) in enumerate(zip(plans, route_plans), 1):
+        if route.route_policy_version != "selector-route-v2":
+            continue
+        bodies = _day_bodies(plan.plan_text or "")
+        for day in route.day_groups:
+            for leg in day.commute_legs:
+                # Read final rendered text, not possibly stale fragment offsets.
+                for match in re.finditer(rf"(?m)^{re.escape(leg.to_name)}[:：]([^\n]*)", bodies.get(day.day, "")):
+                    body = match.group(1)
+                    if normalize_arrival_copy(body, leg) != body:
+                        findings.append(PublishFinding(reason="arrival_duration_ungrounded",
+                            message="arrival-time copy must use the locked incoming route",
+                            plan_index=index, day=day.day, place_id=leg.to_place_id))
+    return findings
+
+
 def check_publish_gate(
     plans: list[PlanOutput],
     *,
@@ -1176,6 +1200,7 @@ def check_publish_gate(
             accommodation=accommodation,
         ))
         findings.extend(_validate_transit_grounding(plans, route_plans))
+        findings.extend(_validate_arrival_durations(plans, route_plans))
         findings.extend(collect_activity_coverage_findings(plans, route_plans))
     findings.extend(_validate_food_authorization(plans, attachment_auth_map))
     for index, plan in enumerate(plans, 1):

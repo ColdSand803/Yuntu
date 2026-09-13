@@ -593,7 +593,6 @@ CREATE TABLE travel_place_summary (
         CHECK (quality_score >= 0 AND quality_score <= 10),
     recommend_score     NUMERIC(3,1) NOT NULL DEFAULT 0
         CHECK (recommend_score >= 0 AND recommend_score <= 10),
-    cleaned_evidence    JSONB,
     updated_time        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -643,10 +642,6 @@ CREATE TABLE travel_plan_record (
     model_name      VARCHAR(50),
     quality_feedback TEXT,
     quality_metrics JSONB,
-    accommodation_name VARCHAR(200),
-    accommodation_lat NUMERIC(10,7),
-    accommodation_lng NUMERIC(10,7),
-    accommodation_source VARCHAR(40),
     created_time    TIMESTAMPTZ     NOT NULL DEFAULT NOW()
 );
 
@@ -676,6 +671,7 @@ CREATE TABLE travel_trip_job (
     current_stage   VARCHAR(30)     NOT NULL
         CHECK (current_stage IN (
             'PENDING', 'INTENT_PARSER', 'DATA_RETRIEVAL', 'SEMANTIC_GROUPING',
+            'POI_SELECTION',
             'ROUTE_PLANNING',
             'FINAL_WRITER',
             'HERMES_REVIEW', 'REVIEW_TAXONOMY', 'WRITER_REPAIR',
@@ -744,10 +740,11 @@ CREATE TABLE travel_trip_job_step (
     stage               VARCHAR(40)     NOT NULL
         CHECK (stage IN (
             'INTENT_PARSER', 'DATA_RETRIEVAL', 'SEMANTIC_GROUPING',
+            'POI_SELECTION',
             'ROUTE_PLANNING',
             'FINAL_WRITER', 'HERMES_REVIEW', 'REVIEW_TAXONOMY',
             'WRITER_REPAIR', 'REVIEW_TAXONOMY_AFTER_REPAIR',
-            'SAFE_PLAN_RENDERER', 'PUBLISH_GATE',
+            'CONTENT_VALIDATION', 'SAFE_PLAN_RENDERER', 'PUBLISH_GATE',
             'PUBLISH_RETRY', 'PERSISTING', 'LLM_OBSERVABILITY'
         )),
     attempt             INT             NOT NULL DEFAULT 1,
@@ -791,7 +788,8 @@ CREATE TABLE trip_projection_outbox (
     event_id           UUID         NOT NULL UNIQUE,
     event_type         VARCHAR(64)  NOT NULL
         CHECK (event_type = 'TRIP_PROJECTION_COMMITTED'),
-    schema_version     VARCHAR(16)  NOT NULL CHECK (schema_version = '1.0'),
+    schema_version     VARCHAR(16)  NOT NULL
+        CHECK (schema_version IN ('1.0', '1.1')),
     aggregate_type     VARCHAR(32)  NOT NULL CHECK (aggregate_type = 'TRIP_JOB'),
     aggregate_id       VARCHAR(160) NOT NULL,
     aggregate_version  BIGINT       NOT NULL CHECK (aggregate_version >= 1),
@@ -921,7 +919,7 @@ CREATE TABLE travel_export_artifact (
     status           VARCHAR(20)    NOT NULL
         CHECK (status IN ('pending', 'running', 'ready', 'failed')),
     source_hash      VARCHAR(64)    NOT NULL,
-    export_version   VARCHAR(20)    NOT NULL,
+    export_version   VARCHAR(64)    NOT NULL,
     storage_backend  VARCHAR(20)    NOT NULL DEFAULT 'local',
     storage_key      TEXT,
     filename         TEXT,
@@ -1350,7 +1348,7 @@ CREATE TABLE travel_relay_endpoint_state (
     endpoint_name               VARCHAR(64) PRIMARY KEY,
     participation               VARCHAR(16) NOT NULL CHECK (participation IN ('ACTIVE', 'CANARY', 'DISABLED')),
     previous_participation      VARCHAR(16) NOT NULL CHECK (previous_participation IN ('ACTIVE', 'CANARY', 'DISABLED')),
-    circuit_state               VARCHAR(16) NOT NULL DEFAULT 'CLOSED' CHECK (circuit_state IN ('CLOSED', 'OPEN', 'QUARANTINED')),
+    circuit_state               VARCHAR(16) NOT NULL DEFAULT 'CLOSED' CHECK (circuit_state IN ('CLOSED', 'OPEN', 'HALF_OPEN', 'QUARANTINED')),
     qualification_state         VARCHAR(16) NOT NULL DEFAULT 'QUALIFIED' CHECK (qualification_state IN ('QUALIFIED', 'UNQUALIFIED')),
     max_inflight                SMALLINT NOT NULL CHECK (max_inflight >= 0),
     routing_weight              SMALLINT NOT NULL CHECK (routing_weight >= 0),
@@ -1365,15 +1363,47 @@ CREATE TABLE travel_relay_endpoint_state (
     contract_valid_count        BIGINT NOT NULL DEFAULT 0,
     pending_policy_count        INT NOT NULL DEFAULT 0 CHECK (pending_policy_count >= 0),
     consecutive_invalid_output  INT NOT NULL DEFAULT 0,
+    consecutive_transient_failures SMALLINT NOT NULL DEFAULT 0 CHECK (consecutive_transient_failures >= 0),
     cooldown_level              SMALLINT NOT NULL DEFAULT 0 CHECK (cooldown_level BETWEEN 0 AND 2),
     cooldown_until              TIMESTAMPTZ,
     probe_owner                 VARCHAR(128),
     probe_lease_expires_at      TIMESTAMPTZ,
+    probe_kind                  VARCHAR(16) CHECK (probe_kind IS NULL OR probe_kind IN ('automatic', 'manual')),
+    recovery_origin_circuit_state VARCHAR(16)
+        CHECK (
+            recovery_origin_circuit_state IS NULL
+            OR recovery_origin_circuit_state IN ('OPEN', 'QUARANTINED')
+        ),
+    active_operation_id         UUID,
+    state_generation            BIGINT NOT NULL DEFAULT 0 CHECK (state_generation >= 0),
+    manual_retry_not_before     TIMESTAMPTZ,
+    manual_retry_level          SMALLINT NOT NULL DEFAULT 0 CHECK (manual_retry_level BETWEEN 0 AND 2),
     operator_actor              VARCHAR(128),
     operator_reason             VARCHAR(500),
     operator_updated_at         TIMESTAMPTZ,
     created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT ck_writer_relay_half_open_metadata CHECK (
+        (
+            circuit_state = 'HALF_OPEN'
+            AND probe_kind IN ('automatic', 'manual')
+            AND probe_owner IS NOT NULL
+            AND probe_lease_expires_at IS NOT NULL
+            AND recovery_origin_circuit_state IN ('OPEN', 'QUARANTINED')
+            AND (
+                probe_kind <> 'manual'
+                OR active_operation_id IS NOT NULL
+            )
+        )
+        OR (
+            circuit_state <> 'HALF_OPEN'
+            AND probe_kind IS NULL
+            AND probe_owner IS NULL
+            AND probe_lease_expires_at IS NULL
+            AND recovery_origin_circuit_state IS NULL
+            AND active_operation_id IS NULL
+        )
+    )
 );
 
 CREATE TABLE travel_writer_dispatch (
@@ -1393,6 +1423,7 @@ CREATE TABLE travel_writer_dispatch (
     safe_failure_class   VARCHAR(64),
     http_status_class    VARCHAR(8),
     failure_signature    VARCHAR(64),
+    half_open_trial      BOOLEAN NOT NULL DEFAULT FALSE,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (logical_call_id, ordinal)
@@ -1406,6 +1437,10 @@ CREATE INDEX idx_writer_dispatch_job_created
 CREATE INDEX idx_writer_dispatch_failure_signature
     ON travel_writer_dispatch (logical_call_id, failure_signature, endpoint_name)
     WHERE failure_signature IS NOT NULL;
+
+CREATE UNIQUE INDEX uq_writer_relay_single_half_open
+    ON travel_relay_endpoint_state ((1))
+    WHERE circuit_state = 'HALF_OPEN';
 
 INSERT INTO travel_relay_endpoint_state (
     endpoint_name, participation, previous_participation,
@@ -1421,7 +1456,138 @@ INSERT INTO travel_relay_endpoint_state (
     ('4router', 'DISABLED', 'DISABLED', 0, 0, 'UNQUALIFIED');
 
 COMMENT ON TABLE travel_relay_endpoint_state IS 'v0.9.4.2 non-secret Writer endpoint capacity, qualification, circuit and weighted-selection authority';
+COMMENT ON COLUMN travel_relay_endpoint_state.state_generation IS
+    'Monotonic fence so stale probe completion cannot overwrite a newer generation';
+COMMENT ON COLUMN travel_relay_endpoint_state.recovery_origin_circuit_state IS
+    'OPEN or QUARANTINED origin restored when a HALF_OPEN lease expires';
+COMMENT ON COLUMN travel_relay_endpoint_state.probe_kind IS
+    'automatic organic trial or manual synthetic recover, never logged as a secret';
+COMMENT ON COLUMN travel_relay_endpoint_state.active_operation_id IS
+    'Manual recover operation owning the in-flight probe';
+COMMENT ON COLUMN travel_relay_endpoint_state.manual_retry_not_before IS
+    'Earliest next manual recover after a failed manual probe';
 COMMENT ON TABLE travel_writer_dispatch IS 'v0.9.4.2 prompt-free durable Writer dispatch and capacity lease ledger';
+
+CREATE TABLE travel_role_relay_endpoint_state (
+    role                            VARCHAR(16) NOT NULL
+        CONSTRAINT travel_role_relay_endpoint_state_role_check
+        CHECK (role IN ('review', 'grouping', 'selector')),
+    endpoint_name                   VARCHAR(64) NOT NULL,
+    configured                      BOOLEAN NOT NULL DEFAULT TRUE,
+    participation                   VARCHAR(16) NOT NULL DEFAULT 'ACTIVE'
+        CHECK (participation IN ('ACTIVE', 'CANARY', 'DISABLED')),
+    qualification_state             VARCHAR(16) NOT NULL DEFAULT 'QUALIFIED'
+        CHECK (qualification_state IN ('QUALIFIED', 'UNQUALIFIED')),
+    circuit_state                   VARCHAR(16) NOT NULL DEFAULT 'CLOSED'
+        CHECK (circuit_state IN ('CLOSED', 'OPEN', 'HALF_OPEN', 'QUARANTINED')),
+    configuration_fingerprint       VARCHAR(64) NOT NULL DEFAULT '',
+    consecutive_transient_failures  SMALLINT NOT NULL DEFAULT 0
+        CHECK (consecutive_transient_failures >= 0),
+    cooldown_level                  SMALLINT NOT NULL DEFAULT 0
+        CHECK (cooldown_level BETWEEN 0 AND 2),
+    cooldown_until                  TIMESTAMPTZ,
+    manual_retry_level              SMALLINT NOT NULL DEFAULT 0
+        CHECK (manual_retry_level BETWEEN 0 AND 2),
+    manual_retry_not_before         TIMESTAMPTZ,
+    probe_kind                      VARCHAR(16)
+        CHECK (probe_kind IS NULL OR probe_kind IN ('automatic', 'manual')),
+    probe_owner                     VARCHAR(128),
+    probe_lease_expires_at          TIMESTAMPTZ,
+    recovery_origin_circuit_state   VARCHAR(16)
+        CHECK (
+            recovery_origin_circuit_state IS NULL
+            OR recovery_origin_circuit_state IN ('OPEN', 'QUARANTINED')
+        ),
+    active_operation_id             UUID,
+    state_generation                BIGINT NOT NULL DEFAULT 0
+        CHECK (state_generation >= 0),
+    created_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (role, endpoint_name),
+    CONSTRAINT ck_role_relay_half_open_metadata CHECK (
+        (
+            circuit_state = 'HALF_OPEN'
+            AND probe_kind IN ('automatic', 'manual')
+            AND probe_owner IS NOT NULL
+            AND probe_lease_expires_at IS NOT NULL
+            AND recovery_origin_circuit_state IN ('OPEN', 'QUARANTINED')
+            AND (
+                probe_kind <> 'manual'
+                OR active_operation_id IS NOT NULL
+            )
+        )
+        OR (
+            circuit_state <> 'HALF_OPEN'
+            AND probe_kind IS NULL
+            AND probe_owner IS NULL
+            AND probe_lease_expires_at IS NULL
+            AND recovery_origin_circuit_state IS NULL
+            AND active_operation_id IS NULL
+        )
+    )
+);
+
+CREATE UNIQUE INDEX uq_role_relay_single_half_open
+    ON travel_role_relay_endpoint_state (role)
+    WHERE circuit_state = 'HALF_OPEN';
+CREATE INDEX idx_role_relay_probe_lease
+    ON travel_role_relay_endpoint_state (role, probe_lease_expires_at)
+    WHERE circuit_state = 'HALF_OPEN';
+
+CREATE TABLE travel_llm_endpoint_recovery_operation (
+    operation_id        UUID PRIMARY KEY,
+    role                VARCHAR(16) NOT NULL
+        CONSTRAINT travel_llm_endpoint_recovery_operation_role_check
+        CHECK (role IN ('writer', 'review', 'grouping', 'selector')),
+    endpoint_name       VARCHAR(64) NOT NULL,
+    lifecycle           VARCHAR(32) NOT NULL
+        CHECK (lifecycle IN (
+            'PENDING',
+            'SUCCEEDED',
+            'FAILED',
+            'EXPIRED',
+            'CONFIGURATION_CHANGED'
+        )),
+    http_status         SMALLINT
+        CHECK (http_status IS NULL OR http_status BETWEEN 200 AND 599),
+    error_code          VARCHAR(64),
+    error_message       VARCHAR(200),
+    retry_after         TIMESTAMPTZ,
+    replay_json         JSONB,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at         TIMESTAMPTZ,
+    CONSTRAINT ck_llm_recovery_operation_terminal CHECK (
+        (
+            lifecycle = 'PENDING'
+            AND finished_at IS NULL
+            AND replay_json IS NULL
+            AND http_status IS NULL
+            AND error_code IS NULL
+            AND error_message IS NULL
+            AND retry_after IS NULL
+        )
+        OR (
+            lifecycle <> 'PENDING'
+            AND finished_at IS NOT NULL
+            AND replay_json IS NOT NULL
+            AND http_status IS NOT NULL
+        )
+    )
+);
+
+CREATE INDEX idx_llm_recovery_operation_target
+    ON travel_llm_endpoint_recovery_operation (role, endpoint_name, created_at DESC);
+
+COMMENT ON TABLE travel_role_relay_endpoint_state IS
+    'v0.9.9.10 Review/Grouping circuit and recovery authority with no capacity, lease or Writer dispatch ledger';
+COMMENT ON COLUMN travel_role_relay_endpoint_state.configuration_fingerprint IS
+    'Non-secret configuration identity digest, never logged, audited or returned';
+COMMENT ON TABLE travel_llm_endpoint_recovery_operation IS
+    'Durable recover replay ledger keyed by operation_id, storing only closed safe results';
+COMMENT ON COLUMN travel_llm_endpoint_recovery_operation.replay_json IS
+    'Safe projection or error envelope, never a URL, key, fingerprint, prompt or provider body';
+
 
 
 -- -----------------------------------------------------------
@@ -1433,13 +1599,13 @@ CREATE TABLE travel_canonical_place_image (
     place_id        BIGINT NOT NULL REFERENCES travel_canonical_place(place_id) ON DELETE CASCADE,
     asset_id        TEXT NOT NULL CHECK (asset_id ~ '^[0-9a-f]{16}$'),
     position        SMALLINT NOT NULL CHECK (position BETWEEN 1 AND 6),
-    desktop_url     TEXT NOT NULL CHECK (desktop_url ~ '^https?://[^[:space:]]+\.webp$'),
+    desktop_url     TEXT NOT NULL CHECK (desktop_url ~ '^https://assets\.kakarot8\.com/[^[:space:]]+\.webp$'),
     desktop_width   INTEGER NOT NULL CHECK (desktop_width > 0),
     desktop_height  INTEGER NOT NULL CHECK (desktop_height > 0),
-    mobile_url      TEXT NOT NULL CHECK (mobile_url ~ '^https?://[^[:space:]]+\.webp$'),
+    mobile_url      TEXT NOT NULL CHECK (mobile_url ~ '^https://assets\.kakarot8\.com/[^[:space:]]+\.webp$'),
     mobile_width    INTEGER NOT NULL CHECK (mobile_width > 0),
     mobile_height   INTEGER NOT NULL CHECK (mobile_height > 0),
-    thumb_url       TEXT NOT NULL CHECK (thumb_url ~ '^https?://[^[:space:]]+\.webp$'),
+    thumb_url       TEXT NOT NULL CHECK (thumb_url ~ '^https://assets\.kakarot8\.com/[^[:space:]]+\.webp$'),
     thumb_width     INTEGER NOT NULL CHECK (thumb_width > 0),
     thumb_height    INTEGER NOT NULL CHECK (thumb_height > 0),
     alt_text        TEXT NOT NULL CHECK (length(btrim(alt_text)) BETWEEN 1 AND 300),

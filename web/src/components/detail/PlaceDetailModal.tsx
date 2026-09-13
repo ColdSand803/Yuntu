@@ -2,6 +2,17 @@ import { useEffect, useRef, useState } from "react";
 import type { TripPlace, PlaceDetail, PlaceGalleryImage } from "@/types/trip";
 import { categoryIcon, isAnchorRole } from "@/constants/places";
 import { fetchPlaceDetail } from "@/services/api";
+import {
+  ChevronLeft,
+  ChevronRight,
+  X,
+  Check,
+  TriangleAlert,
+  Layers,
+  MessageSquare,
+  MapPinned,
+  Navigation,
+} from "lucide-react";
 
 interface PlaceDetailModalProps {
   place: TripPlace | null;
@@ -240,10 +251,7 @@ export function PlaceDetailModal({
                           aria-label="上一张图片"
                           className="absolute left-3 top-1/2 hidden h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-white/90 text-gray-700 shadow-md transition hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-300 lg:flex"
                         >
-                          <i
-                            className="fa-solid fa-chevron-left"
-                            aria-hidden="true"
-                          />
+                          <ChevronLeft size={16} aria-hidden="true" />
                         </button>
                         <button
                           type="button"
@@ -251,10 +259,7 @@ export function PlaceDetailModal({
                           aria-label="下一张图片"
                           className="absolute right-3 top-1/2 hidden h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-white/90 text-gray-700 shadow-md transition hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-300 lg:flex"
                         >
-                          <i
-                            className="fa-solid fa-chevron-right"
-                            aria-hidden="true"
-                          />
+                          <ChevronRight size={16} aria-hidden="true" />
                         </button>
                       </>
                     )}
@@ -327,7 +332,7 @@ export function PlaceDetailModal({
                 aria-label="关闭"
                 className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gray-50 text-gray-400 transition-all hover:scale-105 hover:bg-gray-200 hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-300"
               >
-                <i className="fa-solid fa-times" aria-hidden="true" />
+                <X size={16} aria-hidden="true" />
               </button>
             </div>
 
@@ -355,8 +360,9 @@ export function PlaceDetailModal({
                       key={r}
                       className="text-sand-600 flex items-start gap-2 text-sm"
                     >
-                      <i
-                        className="fa-solid fa-check mt-0.5 shrink-0 text-xs text-primary-500"
+                      <Check
+                        size={12}
+                        className="mt-0.5 shrink-0 text-primary-500"
                         aria-hidden="true"
                       />
                       <span className="leading-relaxed">{r}</span>
@@ -369,8 +375,9 @@ export function PlaceDetailModal({
             {/* 注意事项（橙色提醒条，与天气提醒统一） */}
             {warnings.length > 0 && (
               <div className="mb-4 flex items-start gap-2 rounded-lg border border-accent-100 bg-accent-50 px-3 py-2.5">
-                <i
-                  className="fa-solid fa-triangle-exclamation mt-0.5 shrink-0 text-xs text-accent-500"
+                <TriangleAlert
+                  size={12}
+                  className="mt-0.5 shrink-0 text-accent-500"
                   aria-hidden="true"
                 />
                 <div className="space-y-1">
@@ -391,8 +398,9 @@ export function PlaceDetailModal({
               <div className="text-sand-600 mb-4 flex items-center gap-3 text-xs">
                 {sourceCount > 0 && (
                   <span className="inline-flex items-center gap-1">
-                    <i
-                      className="fa-solid fa-layer-group text-primary-400"
+                    <Layers
+                      size={16}
+                      className="text-primary-400"
                       aria-hidden="true"
                     />
                     综合 {sourceCount} 个来源
@@ -400,8 +408,9 @@ export function PlaceDetailModal({
                 )}
                 {mentionCount > 0 && (
                   <span className="inline-flex items-center gap-1">
-                    <i
-                      className="fa-solid fa-comment-dots text-primary-400"
+                    <MessageSquare
+                      size={16}
+                      className="text-primary-400"
                       aria-hidden="true"
                     />
                     {mentionCount} 次提及
@@ -413,7 +422,7 @@ export function PlaceDetailModal({
             {/* loading / 无更多详情 */}
             {!loading && !hasExtra && (
               <div className="my-4 flex flex-col items-center justify-center gap-1 rounded-2xl bg-sand-50/80 p-5 text-center border border-sand-200/60">
-                <i className="fa-solid fa-map-location-dot text-primary-400 text-lg mb-1" aria-hidden="true" />
+                <MapPinned size={18} className="text-primary-400 mb-1" aria-hidden="true" />
                 <p className="text-xs font-medium text-gray-700">
                   当前地点暂未收录深度图文百科
                 </p>
@@ -433,8 +442,9 @@ export function PlaceDetailModal({
                 rel="noopener noreferrer"
                 className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-sand-100 px-5 py-3.5 text-sm font-bold text-gray-700 transition-colors hover:bg-sand-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-300"
               >
-                <i
-                  className="fa-solid fa-location-arrow text-primary-600"
+                <Navigation
+                  size={16}
+                  className="text-primary-600"
                   aria-hidden="true"
                 />
                 在高德地图中查看路线

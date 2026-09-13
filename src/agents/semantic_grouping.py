@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import asdict, dataclass, field
@@ -352,18 +353,22 @@ async def group_candidates(
     metrics.attempted = True
     payload = _build_grouping_input(trip_request, retrieval.candidates)
     try:
+        settings = get_settings()
         with llm.llm_call_context(
             call_reason="semantic_grouping",
             max_tokens_request=1600,
             relay_request_timeout_seconds=30,
             relay_hedge_delay_seconds=1,
         ):
-            raw, usage = await llm.chat_with_usage(
-                _system_prompt(),
-                json.dumps(payload, ensure_ascii=False),
-                role="grouping",
-                temperature=float(get_settings().grouping_temperature),
-                json_mode=True,
+            raw, usage = await asyncio.wait_for(
+                llm.chat_with_usage(
+                    _system_prompt(),
+                    json.dumps(payload, ensure_ascii=False),
+                    role="grouping",
+                    temperature=float(settings.grouping_temperature),
+                    json_mode=True,
+                ),
+                timeout=float(settings.grouping_wall_timeout_seconds),
             )
         metrics.provider = str(usage.get("provider", ""))
         metrics.model = str(usage.get("model", ""))
@@ -371,6 +376,11 @@ async def group_candidates(
         metrics.prompt_tokens = int(usage.get("token_input", 0) or 0)
         metrics.completion_tokens = int(usage.get("token_output", 0) or 0)
         metrics.total_tokens = metrics.prompt_tokens + metrics.completion_tokens
+    except asyncio.TimeoutError:
+        logger.warning("Semantic Grouping timed out; using deterministic fallback")
+        metrics.validation_failures = ["grouping_timeout"]
+        _fallback_groups(retrieval, metrics, "grouping_timeout")
+        return metrics
     except Exception as exc:
         logger.warning("Semantic Grouping LLM failed; falling back: %s", exc)
         metrics.validation_failures = ["llm_error"]

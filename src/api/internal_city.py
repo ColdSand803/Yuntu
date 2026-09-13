@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Literal
+import secrets
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from src.config import get_settings
-from src.internal.auth import verify_internal_token
 from src.jobs.city_batch_store import (
     CityBatchActiveError,
     CityBatchRecord,
@@ -34,8 +34,47 @@ from src.jobs.city_store import (
     list_cities,
     select_city_refresh_dispatch_candidate,
 )
+from src.db.models import CityAuthorityRecord, CityEventRecord, CityImageRecord
+from src.jobs.city_event_triggers import (
+    CityEventAlreadyConsumedError,
+    CityEventNotFoundError,
+    acknowledge_city_event,
+    get_city_authority,
+    list_city_authority,
+    list_city_images,
+    list_city_reference_images,
+    list_unconsumed_city_events,
+)
 
-router = APIRouter(prefix="/internal", dependencies=[Depends(verify_internal_token)])
+async def verify_city_internal_credential(
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+) -> None:
+    settings = get_settings()
+    credential = settings.yuntu_travel_internal_credential.strip()
+    if credential:
+        scheme, _, token = (authorization or "").partition(" ")
+        if scheme.lower() != "bearer" or not token:
+            raise HTTPException(status_code=401, detail="missing bearer credential")
+        if not secrets.compare_digest(token, credential):
+            raise HTTPException(status_code=403, detail="invalid internal credential")
+        return
+
+    # Compatibility path for deployments that have not yet populated the new
+    # v0.10.3 credential. It preserves the existing internal city operations.
+    legacy = settings.yuntu_travel_admin_token.strip()
+    if not legacy:
+        raise HTTPException(status_code=500, detail="internal credential is not configured")
+    if not x_internal_token:
+        raise HTTPException(status_code=401, detail="missing internal token")
+    if not secrets.compare_digest(x_internal_token, legacy):
+        raise HTTPException(status_code=403, detail="invalid internal token")
+
+
+router = APIRouter(
+    prefix="/internal",
+    dependencies=[Depends(verify_city_internal_credential)],
+)
 
 
 class CityQualitySnapshotResponse(BaseModel):
@@ -73,11 +112,86 @@ class CityResponse(BaseModel):
     disabled_reason: str | None
     active_batch_id: int | None
     latest_quality: CityQualitySnapshotResponse | None
+    display_lng: float | None = None
+    display_lat: float | None = None
+    map_label_offset_x: int = 0
+    map_label_offset_y: int = 0
+    amap_adcode: str | None = None
+    canonical_quality_pass: bool | None = None
+    evidence_quality_pass: bool | None = None
+    last_quality_check_at: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    quality_failure_reasons: list[str] = Field(default_factory=list)
 
 
 class CityListResponse(BaseModel):
     success: bool = True
     cities: list[CityResponse]
+    total: int = 0
+    limit: int = 100
+    offset: int = 0
+
+
+class CityDetailResponse(BaseModel):
+    success: bool = True
+    city: CityResponse
+
+
+class CityImageResponse(BaseModel):
+    id: int
+    city_id: int
+    image_type: str
+    asset_url: str
+    asset_url_mobile: str | None = None
+    asset_url_thumbnail: str | None = None
+    position: int
+    width: int | None = None
+    height: int | None = None
+    format: str | None = None
+    active: bool
+    created_at: str
+
+
+class CityReferenceImageResponse(BaseModel):
+    place_id: int
+    place_name: str
+    asset_id: str
+    asset_url: str
+    asset_url_mobile: str | None = None
+    asset_url_thumbnail: str | None = None
+    image_type: Literal["poi_reference"] = "poi_reference"
+    position: int
+    active: bool = True
+
+
+class CityImageListResponse(BaseModel):
+    success: bool = True
+    images: list[CityImageResponse]
+    reference_images: list[CityReferenceImageResponse] = Field(default_factory=list)
+
+
+class CityEventResponse(BaseModel):
+    event_id: int
+    city_id: int
+    event_type: str
+    event_payload: dict[str, Any]
+    created_at: str
+
+
+class CityEventListResponse(BaseModel):
+    success: bool = True
+    events: list[CityEventResponse]
+    total_unconsumed: int
+
+
+class CityEventAckRequest(BaseModel):
+    consumer_id: str = Field(min_length=1, max_length=64)
+
+
+class CityEventAckResponse(BaseModel):
+    success: bool = True
+    message: str
 
 
 class CityBatchItemResponse(BaseModel):
@@ -196,6 +310,62 @@ def _city_to_response(detail: CityDetailRecord) -> CityResponse:
     )
 
 
+def _authority_to_response(city: CityAuthorityRecord) -> CityResponse:
+    return CityResponse(
+        city_id=city.city_id,
+        canonical_name=city.canonical_name,
+        status=city.status,
+        aliases=list(city.aliases),
+        request_count_30d=city.request_count_30d,
+        last_requested_time=_iso(city.last_requested_time),
+        last_quality_check_time=_iso(city.last_quality_check_at),
+        last_refresh_time=None,
+        next_refresh_time=None,
+        active_confirmed_time=None,
+        disabled_reason=None,
+        active_batch_id=None,
+        latest_quality=None,
+        display_lng=city.display_lng,
+        display_lat=city.display_lat,
+        map_label_offset_x=city.map_label_offset_x,
+        map_label_offset_y=city.map_label_offset_y,
+        amap_adcode=city.amap_adcode,
+        canonical_quality_pass=city.canonical_quality_pass,
+        evidence_quality_pass=city.evidence_quality_pass,
+        last_quality_check_at=_iso(city.last_quality_check_at),
+        created_at=_iso(city.created_at),
+        updated_at=_iso(city.updated_at),
+        quality_failure_reasons=list(city.quality_failure_reasons),
+    )
+
+
+def _image_to_response(image: CityImageRecord) -> CityImageResponse:
+    return CityImageResponse(
+        id=image.image_id,
+        city_id=image.city_id,
+        image_type=image.image_type,
+        asset_url=image.asset_url,
+        asset_url_mobile=image.asset_url_mobile,
+        asset_url_thumbnail=image.asset_url_thumbnail,
+        position=image.position,
+        width=image.width,
+        height=image.height,
+        format=image.format,
+        active=image.active,
+        created_at=_iso(image.created_at) or "",
+    )
+
+
+def _event_to_response(event: CityEventRecord) -> CityEventResponse:
+    return CityEventResponse(
+        event_id=event.event_id,
+        city_id=event.city_id,
+        event_type=event.event_type,
+        event_payload=event.event_payload,
+        created_at=_iso(event.created_at) or "",
+    )
+
+
 def _batch_to_response(batch: CityBatchRecord) -> CityBatchResponse:
     return CityBatchResponse(
         batch_id=batch.batch_id,
@@ -310,19 +480,80 @@ async def _get_recent_batch_inventory_duplicates(
 @router.get("/cities", response_model=CityListResponse)
 async def list_cities_endpoint(
     status: Literal["DISCOVERED", "GRAY", "ACTIVE", "DISABLED"] | None = None,
-    limit: int = Query(default=50, ge=1, le=200),
+    include_disabled: bool = False,
+    limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> CityListResponse:
-    details = await list_cities(status=status, limit=limit, offset=offset)
-    return CityListResponse(cities=[_city_to_response(detail) for detail in details])
+    if status is not None:
+        # Preserve the v0.5 supervision filter while using the v0.10.3 shape.
+        details = await list_cities(status=status, limit=min(limit, 200), offset=offset)
+        cities = [_city_to_response(detail) for detail in details]
+        return CityListResponse(
+            cities=cities, total=len(cities), limit=limit, offset=offset
+        )
+    cities, total = await list_city_authority(
+        include_disabled=include_disabled, limit=limit, offset=offset
+    )
+    return CityListResponse(
+        cities=[_authority_to_response(city) for city in cities],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
-@router.get("/cities/{city_id}", response_model=CityResponse)
-async def get_city_endpoint(city_id: int) -> CityResponse:
-    detail = await get_city_detail(city_id)
-    if detail is None:
+@router.get("/cities/{city_id}", response_model=CityDetailResponse)
+async def get_city_endpoint(city_id: int) -> CityDetailResponse:
+    city = await get_city_authority(city_id)
+    if city is None:
         raise HTTPException(status_code=404, detail="city not found")
-    return _city_to_response(detail)
+    return CityDetailResponse(city=_authority_to_response(city))
+
+
+@router.get("/cities/{city_id}/images", response_model=CityImageListResponse)
+async def list_city_images_endpoint(
+    city_id: int,
+    active_only: bool = True,
+) -> CityImageListResponse:
+    images = await list_city_images(city_id, active_only=active_only)
+    if images is None:
+        raise HTTPException(status_code=404, detail="city not found")
+    return CityImageListResponse(
+        images=[_image_to_response(image) for image in images],
+        reference_images=await list_city_reference_images(city_id),
+    )
+
+
+@router.get("/city-events", response_model=CityEventListResponse)
+async def list_city_events_endpoint(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> CityEventListResponse:
+    events, total = await list_unconsumed_city_events(limit=limit)
+    return CityEventListResponse(
+        events=[_event_to_response(event) for event in events],
+        total_unconsumed=total,
+    )
+
+
+@router.post("/city-events/{event_id}/ack", response_model=CityEventAckResponse)
+async def acknowledge_city_event_endpoint(
+    event_id: int,
+    req: CityEventAckRequest,
+) -> CityEventAckResponse:
+    try:
+        await acknowledge_city_event(event_id, consumer_id=req.consumer_id)
+    except CityEventNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="event not found") from exc
+    except CityEventAlreadyConsumedError as exc:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "success": False,
+                "message": "event already acknowledged",
+                "consumed_by": exc.consumed_by,
+            },
+        )
+    return CityEventAckResponse(message=f"Event {event_id} acknowledged")
 
 
 @router.get("/cities/{city_id}/batches", response_model=CityBatchListResponse)

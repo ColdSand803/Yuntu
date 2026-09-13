@@ -13,6 +13,7 @@ import { useTripTaskStore } from "./stores/tripTaskStore";
 function isImmersiveRoute(pathname: string): boolean {
   return (
     pathname === "/" ||
+    pathname === "/classic" ||
     pathname.startsWith("/planning/") ||
     pathname.startsWith("/plan/") ||
     pathname.startsWith("/demo/")

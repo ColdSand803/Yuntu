@@ -8,7 +8,11 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
-from src.agents.llm import llm_call_context
+from src.agents.llm import (
+    current_llm_observation_record_count,
+    llm_call_context,
+    project_current_llm_usage,
+)
 from src.agents.schema import TripRequest
 
 StageCallback = Callable[[str], Awaitable[None] | None]
@@ -111,6 +115,7 @@ async def _run_observed_step(
     finish_metadata: Callable[[], dict[str, Any]] | None = None,
 ) -> T:
     step_wall_t0 = time.monotonic()
+    llm_record_start = current_llm_observation_record_count()
     current_stage_update_latency_ms = 0
     if set_current_stage:
         current_stage_t0 = time.monotonic()
@@ -134,11 +139,19 @@ async def _run_observed_step(
             stage=stage,
             attempt=attempt,
             publish_retry_round=publish_retry_round,
+            owning_stage=stage,
+            owning_attempt=attempt,
+            owning_publish_retry_round=publish_retry_round,
         ):
             result = await action()
     except Exception as exc:
         action_latency_ms = _elapsed_ms(t0)
         extra_metadata = finish_metadata() if finish_metadata is not None else {}
+        extra_metadata["llm_usage"] = project_current_llm_usage(
+            llm_record_start,
+            complete=True,
+            adopted_generator=extra_metadata.get("adopted_generator"),
+        )
         failed_metadata = {
             **start_metadata,
             **extra_metadata,
@@ -168,6 +181,11 @@ async def _run_observed_step(
         raise
     action_latency_ms = _elapsed_ms(t0)
     extra_metadata = finish_metadata() if finish_metadata is not None else {}
+    extra_metadata["llm_usage"] = project_current_llm_usage(
+        llm_record_start,
+        complete=True,
+        adopted_generator=extra_metadata.get("adopted_generator"),
+    )
     if "stage_action_latency_ms_total" in extra_metadata:
         extra_metadata["stage_action_latency_ms_total"] = (
             int(extra_metadata["stage_action_latency_ms_total"])

@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { useShareImageTaskStore } from "@/stores/shareImageTaskStore";
 import { saveBlob } from "@/utils/download";
 import { showToast } from "@/stores/toastStore";
+import { X, Sparkles, Copy, Download } from "lucide-react";
 
 interface ShareDialogProps {
   open: boolean;
@@ -165,7 +166,7 @@ export function ShareDialog({ open, onClose, recordId, jobId }: ShareDialogProps
             className="flex h-10 w-10 items-center justify-center rounded-full bg-gray-50 text-gray-400 transition-all hover:bg-gray-200 hover:scale-105 hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-300"
             aria-label="关闭"
           >
-            <i className="fa-solid fa-times" aria-hidden="true" />
+            <X size={16} aria-hidden="true" />
           </button>
         </div>
 
@@ -189,8 +190,9 @@ export function ShareDialog({ open, onClose, recordId, jobId }: ShareDialogProps
               <div className="relative mb-8 flex h-32 w-32 items-center justify-center">
                 <div className="absolute inset-0 animate-ping rounded-full bg-primary-100 opacity-75" />
                 <div className="relative flex h-24 w-24 items-center justify-center rounded-full bg-primary-50 shadow-inner">
-                  <i
-                    className="fa-solid fa-sparkles animate-pulse text-3xl text-primary-500"
+                  <Sparkles
+                    size={30}
+                    className="animate-pulse text-primary-500"
                     aria-hidden="true"
                   />
                 </div>
@@ -288,14 +290,14 @@ export function ShareDialog({ open, onClose, recordId, jobId }: ShareDialogProps
               onClick={handleCopy}
               className="flex items-center justify-center gap-2 rounded-full border border-gray-200 bg-white px-5 py-2.5 text-sm font-bold text-gray-700 transition-all hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-300"
             >
-              <i className="fa-regular fa-copy" aria-hidden="true" />
+              <Copy size={16} aria-hidden="true" />
               复制图片
             </button>
             <button
               onClick={handleSave}
               className="flex items-center justify-center gap-2 rounded-full bg-primary-600 px-6 py-2.5 text-sm font-bold text-white shadow-md shadow-primary-600/20 transition-all hover:bg-primary-700 hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400"
             >
-              <i className="fa-solid fa-download" aria-hidden="true" />
+              <Download size={16} aria-hidden="true" />
               保存图片
             </button>
           </div>

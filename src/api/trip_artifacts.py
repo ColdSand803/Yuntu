@@ -226,9 +226,9 @@ def _artifact_response(
     )
 
 
-async def _source_or_error(result_record_id: int):
+async def _source_or_error(result_record_id: int, artifact_type: str):
     try:
-        source = await build_export_source(result_record_id)
+        source = await build_export_source(result_record_id, artifact_type)
     except ResultContractUnsupported:
         return _error_response(
             422,
@@ -256,7 +256,7 @@ async def create_trip_artifact(
     if not _validate_artifact_type(artifact_type):
         return _unsupported_artifact_type_response()
 
-    source = await _source_or_error(result_record_id)
+    source = await _source_or_error(result_record_id, artifact_type)
     if isinstance(source, JSONResponse):
         return source
 
@@ -306,7 +306,7 @@ async def get_trip_artifact_status(
     if not _validate_artifact_type(artifact_type):
         return _unsupported_artifact_type_response()
 
-    source = await _source_or_error(result_record_id)
+    source = await _source_or_error(result_record_id, artifact_type)
     if isinstance(source, JSONResponse):
         return source
 
@@ -335,7 +335,7 @@ async def download_trip_artifact(
     if not _validate_artifact_type(artifact_type):
         return _unsupported_artifact_type_response()
 
-    source = await _source_or_error(result_record_id)
+    source = await _source_or_error(result_record_id, artifact_type)
     if isinstance(source, JSONResponse):
         return source
 

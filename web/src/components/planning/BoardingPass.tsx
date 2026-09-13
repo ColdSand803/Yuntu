@@ -1,4 +1,5 @@
 import type { TripFormData } from "@/types/form";
+import { Plane } from "lucide-react";
 
 interface BoardingPassProps {
   city: string;
@@ -66,7 +67,7 @@ export function BoardingPass({ city, formData, jobId }: BoardingPassProps) {
             </span>
             <div className="w-full flex items-center text-primary-500 my-1">
               <span className="h-px flex-1 bg-gradient-to-r from-transparent to-primary-300" />
-              <i className="fas fa-plane mx-1.5 text-xs text-primary-600" aria-hidden="true" />
+              <Plane size={12} className="mx-1.5 text-primary-600" aria-hidden="true" />
               <span className="h-px flex-1 bg-gradient-to-r from-primary-300 to-transparent border-dashed" />
             </div>
             <span className="text-[9px] text-gray-400 font-medium">AI 深度定制</span>

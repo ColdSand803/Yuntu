@@ -20,6 +20,7 @@ from src.api.internal_admin import (
 from src.api.internal_admin import (
     router as internal_admin_router,
 )
+from src.api.destinations import router as destinations_router
 from src.api.internal_city import router as internal_city_router
 from src.api.internal_crawl import router as internal_crawl_router
 from src.api.internal_feedback import router as internal_feedback_router
@@ -116,6 +117,7 @@ app.include_router(trip_async_router)
 app.include_router(trip_results_router)
 app.include_router(trip_artifacts_router)
 app.include_router(trip_places_router)
+app.include_router(destinations_router)
 app.include_router(internal_trip_places_router)
 app.include_router(internal_city_router)
 app.include_router(internal_crawl_router)

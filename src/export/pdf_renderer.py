@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
+from zoneinfo import ZoneInfo
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
@@ -24,18 +25,22 @@ from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     HRFlowable,
+    KeepTogether,
     PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
+    Table,
+    TableStyle,
 )
 
-from src.export.city_background import CityBackgroundClient, resolve_city_background
+from src.export.city_background import CityBackgroundClient, fallback_city_background_with_metadata
+from src.export.city_photo import CityPhotoEntry, CityPhotoResolver
 from src.export.cost_estimate import (
-    cost_estimate_lines,
+    CATEGORY_LABELS,
+    range_text,
     validate_artifact_cost_estimate,
 )
-from src.export.image_prompt import build_pdf_background_prompt
 from src.export.public_text import public_items, public_text
 
 FONT_NAME = "YunTuTravelCJK"
@@ -48,16 +53,16 @@ PDF_MIME_TYPE = "application/pdf"
 PDF_HARD_MAX_BYTES = 5 * 1024 * 1024
 COVER_BACKGROUND_MAX_SIZE = (1200, 1697)
 COVER_BACKGROUND_JPEG_QUALITY = 82
-TEXT_PRIMARY = colors.HexColor("#F6F1E7")
-TEXT_MUTED = colors.HexColor("#E7D9BC")
-TEXT_ACCENT = colors.HexColor("#F7C978")
-TEXT_SUBTLE = colors.HexColor("#D8C6A6")
-SECTION_RULE_COLOR = colors.HexColor("#D9B36A")
-BODY_SCRIM_RGBA = (7, 20, 33, 44)
-COVER_SCRIM_RGBA = (31, 20, 12, 34)
-BODY_HEADER_SCRIM_RGBA = (7, 20, 33, 58)
-BODY_HEADER_RULE_RGBA = (217, 179, 106, 155)
-BODY_HEADER_HEIGHT = 138
+TEXT_PRIMARY = colors.HexColor("#172033")
+TEXT_MUTED = colors.HexColor("#596274")
+TEXT_ACCENT = colors.HexColor("#087F73")
+TEXT_COST = colors.HexColor("#B65F2A")
+TEXT_SUBTLE = colors.HexColor("#737B89")
+SECTION_RULE_COLOR = colors.HexColor("#C9D8D4")
+PAPER = colors.HexColor("#FBF8F1")
+COVER_TEXT = colors.HexColor("#FFFDF8")
+COVER_MUTED = colors.HexColor("#E8E3D9")
+COVER_SCRIM_RGBA = (10, 20, 31, 42)
 
 
 class PdfRenderError(RuntimeError):
@@ -95,6 +100,7 @@ def render_pdf_artifact(
     *,
     cover_background_path: Path | None = None,
     ai_background_client: CityBackgroundClient | None = None,
+    city_photo_resolver: CityPhotoResolver | None = None,
     storage_key: str | None = None,
     generated_time: datetime | None = None,
 ) -> PdfRenderResult:
@@ -115,11 +121,11 @@ def render_pdf_artifact(
 
     background_state = _page_background_state(
         result,
-        ai_background_client=ai_background_client,
+        city_photo_resolver=city_photo_resolver,
         background_path=cover_background_path,
     )
     text_parts: list[str] = []
-    story = _build_story(result, generated_time, font.name, text_parts)
+    story = _build_story(result, generated_time, font.name, text_parts, background_state)
 
     temp_path = output_path.with_name(
         f".{output_path.name}.{uuid.uuid4().hex}.tmp",
@@ -142,6 +148,7 @@ def render_pdf_artifact(
             onFirstPage=lambda canvas, _doc: _draw_cover_page(
                 canvas,
                 background_state,
+                font.name,
             ),
             onLaterPages=lambda canvas, _doc: _draw_body_page(
                 canvas,
@@ -195,7 +202,7 @@ def _validated_result(payload: dict[str, Any]) -> dict[str, Any]:
     result = payload.get("result")
     if not isinstance(result, dict):
         raise PdfRenderError("INVALID_EXPORT_SOURCE")
-    if result.get("schema_version") not in {"2.0", "2.1"}:
+    if result.get("schema_version") not in {"2.0", "2.1", "2.2"}:
         raise PdfRenderError("INVALID_EXPORT_SOURCE")
 
     request = result.get("request")
@@ -281,12 +288,14 @@ def _build_story(
     generated_time: datetime,
     font_name: str,
     text_parts: list[str],
+    background_state: dict[str, Any],
 ) -> list[Any]:
     styles = _styles(font_name)
     story: list[Any] = []
     _add_cover(story, result, generated_time, styles, text_parts)
     story.append(PageBreak())
     _add_body(story, result, styles, text_parts)
+    _add_photo_attribution(story, background_state.get("entry"), styles, text_parts)
     return story
 
 
@@ -300,12 +309,37 @@ def _add_cover(
     request = _dict(result.get("request"))
     city_name = _city_name(result)
     title = f"{city_name}{_to_int(request.get('days'))}天完整行程"
-    story.append(Spacer(1, 2.35 * cm))
+    story.append(Spacer(1, 4.15 * cm))
     _para(story, styles["cover_title"], title, text_parts)
-    _para(story, styles["cover_subtitle"], "Backend text PDF export", text_parts)
+    _para(story, styles["cover_subtitle"], "云途 · 浅色路线册", text_parts)
     story.append(Spacer(1, 0.7 * cm))
 
-    _kv(story, styles, "目的地", city_name, text_parts)
+    date_range = _date_range_text(request)
+    if date_range:
+        _para(story, styles["cover_body"], date_range, text_parts)
+    _para(
+        story,
+        styles["cover_body"],
+        f"{_people_text(request.get('people_count'))} · {_list_text(request.get('preferences'), '自在探索')}",
+        text_parts,
+    )
+
+    summary = _result_summary(result)
+    if summary:
+        story.append(Spacer(1, 0.35 * cm))
+        _para(story, styles["cover_body"], summary, text_parts)
+
+
+def _add_body(
+    story: list[Any],
+    result: dict[str, Any],
+    styles: dict[str, ParagraphStyle],
+    text_parts: list[str],
+) -> None:
+    _para(story, styles["h1"], "完整行程", text_parts)
+    request = _dict(result.get("request"))
+    _section_label(story, styles, "行程概览", text_parts)
+    _kv(story, styles, "目的地", _city_name(result), text_parts)
     _kv(story, styles, "行程天数", f"{_to_int(request.get('days'))} 天", text_parts)
     _kv(story, styles, "人数", _people_text(request.get("people_count")), text_parts)
     date_range = _date_range_text(request)
@@ -316,25 +350,7 @@ def _add_cover(
     _kv(story, styles, "备注", _text(request.get("notes"), "未填写"), text_parts)
     _kv(story, styles, "必去", _must_include_text(result.get("must_include")), text_parts)
     _kv(story, styles, "时间偏好", _time_preferences_text(result.get("time_preferences")), text_parts)
-
-    summary = _result_summary(result)
-    if summary:
-        story.append(Spacer(1, 0.35 * cm))
-        _section_label(story, styles, "摘要", text_parts)
-        _para(story, styles["body_large"], summary, text_parts)
-
-    story.append(Spacer(1, 0.45 * cm))
-    _kv(story, styles, "Result ID", str(result.get("result_id")), text_parts)
-    _kv(story, styles, "Generated", generated_time.strftime("%Y-%m-%d %H:%M UTC"), text_parts)
-
-
-def _add_body(
-    story: list[Any],
-    result: dict[str, Any],
-    styles: dict[str, ParagraphStyle],
-    text_parts: list[str],
-) -> None:
-    _para(story, styles["h1"], "完整行程", text_parts)
+    story.append(Spacer(1, 0.35 * cm))
     weather_by_day = _weather_by_day(result.get("weather"))
     for plan_index, plan in enumerate(_list(result.get("plans")), start=1):
         if plan_index > 1:
@@ -360,6 +376,78 @@ def _add_plan(
     for day in _list(plan.get("days")):
         _add_day(story, day, weather_by_day, styles, text_parts)
     _add_cost_estimate(story, plan.get("cost_estimate"), styles, text_parts)
+    _add_advice(story, plan, styles, text_parts)
+
+
+def _add_advice(
+    story: list[Any],
+    plan: dict[str, Any],
+    styles: dict[str, ParagraphStyle],
+    text_parts: list[str],
+) -> None:
+    packing = _list(plan.get("packing_checklist"))
+    packing_lines = []
+    for group in packing:
+        category = public_text(group.get("category"))
+        items = [public_text(item) for item in group.get("items") or []]
+        items = [item for item in items if item]
+        if category and items:
+            packing_lines.append(f"— {category}：{'、'.join(items)}")
+    if packing_lines:
+        _add_bullet_section(story, "出行清单", packing_lines, styles, text_parts)
+
+    tips = _list(plan.get("travel_tips"))
+    tip_lines = []
+    for tip in tips:
+        title = public_text(tip.get("title"))
+        content = public_text(tip.get("content"))
+        if title and content:
+            tip_lines.append(f"— {title}：{content}")
+    if tip_lines:
+        _add_bullet_section(story, "旅行贴士", tip_lines, styles, text_parts)
+
+
+def _add_bullet_section(
+    story: list[Any],
+    label: str,
+    lines: list[str],
+    styles: dict[str, ParagraphStyle],
+    text_parts: list[str],
+) -> None:
+    story.append(Spacer(1, 0.16 * cm))
+    text_parts.append(label)
+    text_parts.extend(lines)
+    label_para = Paragraph(_markup(label), styles["label"])
+    bullet_paras = [Paragraph(_markup(line), styles["bullet"]) for line in lines]
+    story.append(KeepTogether([label_para, bullet_paras[0]]))
+    story.extend(bullet_paras[1:])
+
+
+def _add_photo_attribution(
+    story: list[Any],
+    entry: CityPhotoEntry | None,
+    styles: dict[str, ParagraphStyle],
+    text_parts: list[str],
+) -> None:
+    if entry is None:
+        return
+    plain = (
+        f"封面摄影：{entry.author}；来源：{entry.provider}；许可：{entry.license}。"
+        f"{entry.modification_notice} 原图：{entry.source_page_url}"
+    )
+    if entry.license_url:
+        plain += f"；许可文本：{entry.license_url}"
+    text_parts.append(plain)
+    source_link = f'<link href="{escape(entry.source_page_url)}" color="#087F73">查看原图</link>'
+    license_link = ""
+    if entry.license_url:
+        license_link = f' · <link href="{escape(entry.license_url)}" color="#087F73">查看许可</link>'
+    markup = (
+        f'<font color="#087F73">封面摄影</font> · {escape(entry.author)} · '
+        f'{escape(entry.provider)} · {escape(entry.license)} · {source_link}{license_link} · '
+        f"{escape(entry.modification_notice)}"
+    )
+    story.append(Paragraph(markup, styles["credit"]))
 
 
 def _add_cost_estimate(
@@ -368,10 +456,148 @@ def _add_cost_estimate(
     styles: dict[str, ParagraphStyle],
     text_parts: list[str],
 ) -> None:
+    summary = validate_artifact_cost_estimate(raw)
     story.append(Spacer(1, 0.24 * cm))
     _section_label(story, styles, "行程消费预估", text_parts)
-    for line in cost_estimate_lines(raw):
-        _para(story, styles["bullet"], line, text_parts)
+
+    local_time = summary.estimated_at.astimezone(ZoneInfo("Asia/Shanghai"))
+    status_text = f"费用参考 · 更新于 {local_time:%Y-%m-%d %H:%M}"
+    text_parts.append(status_text)
+    status = Table(
+        [[Paragraph(_markup(status_text), styles["cost_meta"])]],
+        colWidths=[17.85 * cm],
+        hAlign="LEFT",
+    )
+    status.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#EDF5F2")),
+        ("BOX", (0, 0), (-1, -1), 0.35, colors.HexColor("#D7E7E2")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(status)
+    story.append(Spacer(1, 0.12 * cm))
+
+    shared_categories = _shared_cost_categories(summary.scenarios)
+    shared_names = {item.category for item in shared_categories}
+    scenario_rows: list[list[Paragraph]] = []
+    for scenario in summary.scenarios:
+        total_text = _scenario_total_text(scenario)
+        detail_text = _scenario_cost_detail(scenario, shared_names)
+        row_text = f"{scenario.label}：{total_text}；{detail_text}"
+        text_parts.append(row_text)
+        scenario_rows.append([
+            Paragraph(_markup(scenario.label), styles["cost_scenario"]),
+            Paragraph(_markup(total_text), styles["cost_amount"]),
+            Paragraph(_markup(detail_text), styles["cost_detail"]),
+        ])
+    scenario_table = Table(
+        scenario_rows,
+        colWidths=[3.65 * cm, 4.35 * cm, 9.85 * cm],
+        hAlign="LEFT",
+    )
+    scenario_table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.HexColor("#FBFAF6"), colors.HexColor("#F7F4EC")]),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.3, colors.HexColor("#E2DDD2")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(scenario_table)
+
+    if shared_categories:
+        story.append(Spacer(1, 0.16 * cm))
+        shared_label = "共同费用" if len(summary.scenarios) > 1 else "费用明细"
+        text_parts.append(shared_label)
+        story.append(Paragraph(_markup(shared_label), styles["cost_group"]))
+        detail_rows: list[list[Paragraph]] = []
+        for category in shared_categories:
+            label = CATEGORY_LABELS[category.category]
+            value = _cost_category_value(category)
+            note = category.basis_label
+            text_parts.append(f"{label}：{value}（{note}）")
+            detail_rows.append([
+                Paragraph(_markup(label), styles["cost_category"]),
+                Paragraph(_markup(value), styles["cost_value"]),
+                Paragraph(_markup(note), styles["cost_detail"]),
+            ])
+        detail_table = Table(
+            detail_rows,
+            colWidths=[3.65 * cm, 4.35 * cm, 9.85 * cm],
+            hAlign="LEFT",
+        )
+        detail_table.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LINEBELOW", (0, 0), (-1, -1), 0.3, colors.HexColor("#E2DDD2")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        story.append(detail_table)
+
+    if summary.exclusions:
+        exclusions = "；".join(item.label for item in summary.exclusions)
+        text_parts.append(f"未计范围：{exclusions}")
+        story.append(Paragraph(
+            f'<font color="#087F73">未计范围</font> · {_markup(exclusions)}',
+            styles["cost_note"],
+        ))
+    text_parts.append(summary.notice)
+    story.append(Paragraph(_markup(summary.notice), styles["cost_notice"]))
+
+
+def _shared_cost_categories(scenarios: Any) -> list[Any]:
+    scenarios = list(scenarios)
+    if not scenarios:
+        return []
+    shared: list[Any] = []
+    for index, category in enumerate(scenarios[0].categories):
+        if len(scenarios) > 1 and category.category == "intercity_transport":
+            continue
+        if all(other.categories[index] == category for other in scenarios[1:]):
+            shared.append(category)
+    return shared
+
+
+def _scenario_total_text(scenario: Any) -> str:
+    if scenario.total_range is None:
+        return "费用暂不可估算"
+    prefix = "已估" if scenario.total_scope == "estimated_subset" else "预估"
+    return f"{prefix} {_pdf_range_text(scenario.total_range)}"
+
+
+def _scenario_cost_detail(scenario: Any, shared_names: set[str]) -> str:
+    details: list[str] = []
+    for category in scenario.categories:
+        if category.category in shared_names:
+            continue
+        if scenario.scenario_id == "without_intercity" and category.category == "intercity_transport":
+            details.append("不含往返大交通")
+        else:
+            details.append(
+                f"{CATEGORY_LABELS[category.category]} {_cost_category_value(category)}"
+                f"（{category.basis_label}）"
+            )
+    missing_count = len(scenario.missing_categories)
+    if scenario.scenario_id == "without_intercity" and "intercity_transport" in scenario.missing_categories:
+        missing_count -= 1
+    if missing_count > 0:
+        details.append(f"另有 {missing_count} 项待确认")
+    return " · ".join(details) or "费用项已完整估算"
+
+
+def _cost_category_value(category: Any) -> str:
+    if category.range is None:
+        return "待确认"
+    return _pdf_range_text(category.range)
+
+
+def _pdf_range_text(value: Any) -> str:
+    return range_text(value).replace("¥", "￥")
 
 
 def _add_day(
@@ -382,10 +608,13 @@ def _add_day(
     text_parts: list[str],
 ) -> None:
     day_no = _to_int(day.get("day"))
-    title = f"Day {day_no}｜{_text(day.get('title'))}"
-    story.append(HRFlowable(width="100%", thickness=0.6, color=colors.HexColor("#D8DEE9")))
-    story.append(Spacer(1, 0.2 * cm))
-    _para(story, styles["h3"], title, text_parts)
+    title = public_text(f"Day {day_no}｜{_text(day.get('title'))}")
+    text_parts.append(title)
+    story.append(KeepTogether([
+        HRFlowable(width="100%", thickness=0.6, color=SECTION_RULE_COLOR),
+        Spacer(1, 0.2 * cm),
+        Paragraph(_markup(title), styles["h3"]),
+    ]))
     _kv(story, styles, "天气", _weather_text(weather_by_day.get(day_no)), text_parts)
     _kv(story, styles, "当日节奏", _pace_status_text(day.get("pace_status")), text_parts)
 
@@ -440,7 +669,7 @@ def _styles(font_name: str) -> dict[str, ParagraphStyle]:
             fontSize=27,
             leading=33,
             alignment=TA_CENTER,
-            textColor=TEXT_PRIMARY,
+            textColor=COVER_TEXT,
             spaceAfter=12,
         ),
         "cover_subtitle": style(
@@ -448,8 +677,17 @@ def _styles(font_name: str) -> dict[str, ParagraphStyle]:
             fontSize=10,
             leading=14,
             alignment=TA_CENTER,
-            textColor=TEXT_ACCENT,
+            textColor=COVER_MUTED,
             spaceAfter=18,
+        ),
+        "cover_body": style(
+            "YuntuCoverBody",
+            fontSize=10.5,
+            leading=17,
+            alignment=TA_CENTER,
+            textColor=COVER_TEXT,
+            leftIndent=0.45 * cm,
+            rightIndent=0.45 * cm,
         ),
         "h1": style(
             "YuntuH1",
@@ -501,6 +739,82 @@ def _styles(font_name: str) -> dict[str, ParagraphStyle]:
             firstLineIndent=-0.15 * cm,
             spaceAfter=3,
         ),
+        "credit": style(
+            "YuntuCredit",
+            fontSize=6.8,
+            leading=9.5,
+            textColor=TEXT_SUBTLE,
+            spaceBefore=4,
+            spaceAfter=0,
+        ),
+        "cost_meta": style(
+            "YuntuCostMeta",
+            fontSize=8.5,
+            leading=12,
+            textColor=TEXT_ACCENT,
+            spaceAfter=0,
+        ),
+        "cost_scenario": style(
+            "YuntuCostScenario",
+            fontSize=9,
+            leading=13,
+            textColor=TEXT_PRIMARY,
+            spaceAfter=0,
+        ),
+        "cost_amount": style(
+            "YuntuCostAmount",
+            fontSize=10.5,
+            leading=14,
+            textColor=TEXT_COST,
+            spaceAfter=0,
+        ),
+        "cost_group": style(
+            "YuntuCostGroup",
+            fontSize=8.2,
+            leading=11,
+            textColor=TEXT_MUTED,
+            leftIndent=0.08 * cm,
+            spaceBefore=1,
+            spaceAfter=2,
+        ),
+        "cost_category": style(
+            "YuntuCostCategory",
+            fontSize=8.5,
+            leading=12,
+            textColor=TEXT_PRIMARY,
+            spaceAfter=0,
+        ),
+        "cost_value": style(
+            "YuntuCostValue",
+            fontSize=8.5,
+            leading=12,
+            textColor=TEXT_PRIMARY,
+            spaceAfter=0,
+        ),
+        "cost_detail": style(
+            "YuntuCostDetail",
+            fontSize=7.8,
+            leading=11,
+            textColor=TEXT_MUTED,
+            spaceAfter=0,
+        ),
+        "cost_note": style(
+            "YuntuCostNote",
+            fontSize=7.8,
+            leading=12,
+            textColor=TEXT_MUTED,
+            leftIndent=0.08 * cm,
+            spaceAfter=2,
+        ),
+        "cost_notice": style(
+            "YuntuCostNotice",
+            fontSize=7.5,
+            leading=11,
+            textColor=TEXT_SUBTLE,
+            leftIndent=0.08 * cm,
+            spaceBefore=2,
+            spaceAfter=3,
+        ),
     }
 
 
@@ -530,7 +844,7 @@ def _kv(
     plain = f"{label}：{clean_value}"
     text_parts.append(plain)
     markup = (
-        f'<font color="#F7C978">{escape(label)}：</font>'
+        f'<font color="#087F73">{escape(label)}：</font>'
         f'{_markup(clean_value)}'
     )
     story.append(Paragraph(markup, styles["body"]))
@@ -639,7 +953,7 @@ def _try_register_font(path: Path) -> bool:
 def _page_background_state(
     result: dict[str, Any],
     *,
-    ai_background_client: CityBackgroundClient | None,
+    city_photo_resolver: CityPhotoResolver | None,
     background_path: Path | None,
 ) -> dict[str, Any]:
     from PIL import Image
@@ -651,48 +965,53 @@ def _page_background_state(
                 image = supplied.convert("RGB")
             metadata = {
                 "background_status": "provided",
+                "photo_status": "provided",
                 "ai_call_attempted": False,
                 "ai_call_count": 0,
             }
+            entry = None
         except Exception:
-            resolved = resolve_city_background(
-                build_pdf_background_prompt(
-                    city=_city_name(result),
-                    days=_to_int(_dict(result.get("request")).get("days")),
-                ),
-                None,
-            )
-            image = resolved.image
-            metadata = {**resolved.metadata, "background_error_code": "invalid_provided_image"}
-    else:
-        resolved = resolve_city_background(
-            build_pdf_background_prompt(
-                city=_city_name(result),
-                days=_to_int(_dict(result.get("request")).get("days")),
-            ),
-            ai_background_client,
-        )
+            image, fallback = fallback_city_background_with_metadata(None)
+            metadata = {
+                **fallback,
+                "background_status": "fallback",
+                "photo_status": "fallback",
+                "photo_error_code": "invalid_provided_image",
+                "background_error_code": "invalid_provided_image",
+                "ai_call_attempted": False,
+                "ai_call_count": 0,
+            }
+            entry = None
+    elif city_photo_resolver is not None:
+        resolved = city_photo_resolver.resolve(_city_name(result))
         image = resolved.image
+        entry = resolved.entry
         metadata = resolved.metadata
+    else:
+        image, fallback = fallback_city_background_with_metadata(None)
+        entry = None
+        metadata = {
+            **fallback,
+            "background_status": "fallback",
+            "photo_status": "fallback",
+            "photo_error_code": "photo_resolver_disabled",
+            "ai_call_attempted": False,
+            "ai_call_count": 0,
+        }
 
-    backgrounds = {
-        page_kind: _compressed_page_background(image, page_kind=page_kind)
-        for page_kind in ("cover", "body")
-    }
+    background = _compressed_cover_background(image)
     return {
         **metadata,
         "status": metadata["background_status"],
-        "readers": {
-            page_kind: ImageReader(BytesIO(background))
-            for page_kind, background in backgrounds.items()
-        },
-        "byte_size": max(len(background) for background in backgrounds.values()),
+        "entry": entry,
+        "reader": ImageReader(BytesIO(background)),
+        "byte_size": len(background),
         "pages_drawn": 0,
     }
 
 
-def _compressed_page_background(image, *, page_kind: str) -> bytes:
-    from PIL import Image, ImageDraw, ImageOps
+def _compressed_cover_background(image) -> bytes:
+    from PIL import Image, ImageOps
 
     fitted = ImageOps.fit(
         image.convert("RGB"),
@@ -700,23 +1019,10 @@ def _compressed_page_background(image, *, page_kind: str) -> bytes:
         method=Image.Resampling.LANCZOS,
         centering=(0.5, 0.45),
     )
-    scrim = BODY_SCRIM_RGBA if page_kind == "body" else COVER_SCRIM_RGBA
     composed = Image.alpha_composite(
         fitted.convert("RGBA"),
-        Image.new("RGBA", fitted.size, scrim),
+        Image.new("RGBA", fitted.size, COVER_SCRIM_RGBA),
     )
-    if page_kind == "body":
-        header = Image.new(
-            "RGBA",
-            (fitted.width, BODY_HEADER_HEIGHT),
-            BODY_HEADER_SCRIM_RGBA,
-        )
-        composed.alpha_composite(header, (0, 0))
-        header_draw = ImageDraw.Draw(composed)
-        header_draw.rectangle(
-            (0, BODY_HEADER_HEIGHT - 4, fitted.width, BODY_HEADER_HEIGHT),
-            fill=BODY_HEADER_RULE_RGBA,
-        )
     output = BytesIO()
     composed.convert("RGB").save(
         output,
@@ -727,13 +1033,8 @@ def _compressed_page_background(image, *, page_kind: str) -> bytes:
     return output.getvalue()
 
 
-def _draw_page_background(
-    canvas,
-    background_state: dict[str, Any],
-    *,
-    page_kind: str,
-) -> None:
-    reader = background_state["readers"][page_kind]
+def _draw_cover_page(canvas, background_state: dict[str, Any], font_name: str) -> None:
+    reader = background_state["reader"]
     page_width, page_height = A4
     try:
         canvas.drawImage(
@@ -747,10 +1048,15 @@ def _draw_page_background(
         background_state["pages_drawn"] += 1
     except Exception:
         background_state["status"] = "draw_failed"
-
-
-def _draw_cover_page(canvas, background_state: dict[str, Any]) -> None:
-    _draw_page_background(canvas, background_state, page_kind="cover")
+    canvas.saveState()
+    canvas.setFillColor(colors.Color(0.035, 0.065, 0.10, alpha=0.76))
+    canvas.roundRect(1.25 * cm, 8.2 * cm, page_width - 2.5 * cm, 14.2 * cm, 14, fill=1, stroke=0)
+    entry = background_state.get("entry")
+    if entry is not None:
+        canvas.setFillColor(COVER_MUTED)
+        canvas.setFont(font_name, 6.5)
+        canvas.drawRightString(page_width - 0.8 * cm, 0.65 * cm, entry.short_credit)
+    canvas.restoreState()
 
 
 def _draw_body_page(
@@ -759,7 +1065,13 @@ def _draw_body_page(
     result: dict[str, Any],
     font_name: str,
 ) -> None:
-    _draw_page_background(canvas, background_state, page_kind="body")
+    canvas.saveState()
+    canvas.setFillColor(PAPER)
+    canvas.rect(0, 0, A4[0], A4[1], fill=1, stroke=0)
+    canvas.setStrokeColor(SECTION_RULE_COLOR)
+    canvas.setLineWidth(0.7)
+    canvas.line(1.45 * cm, A4[1] - 1.0 * cm, A4[0] - 1.45 * cm, A4[1] - 1.0 * cm)
+    canvas.restoreState()
     _draw_footer(canvas, result, font_name)
 
 
@@ -811,7 +1123,7 @@ def _validated_render_result(
 
     metadata = {
         "renderer": "reportlab",
-        "renderer_version": "p2-reportlab-city-background",
+        "renderer_version": "v0.9.9.9-light-routebook-layout-3",
         "export_version": str(payload.get("export_version") or ""),
         "font_source": font.source,
         "cover_image_status": background_state["status"],
@@ -825,6 +1137,20 @@ def _validated_render_result(
         metadata["background_image_byte_size"] = int(background_state["byte_size"])
     if background_state.get("background_error_code"):
         metadata["background_error_code"] = background_state["background_error_code"]
+    for key in (
+        "photo_status",
+        "photo_catalog_revision",
+        "photo_object_key",
+        "photo_sha256",
+        "photo_cache_hit",
+        "photo_failure_cache_hit",
+        "photo_error_code",
+        "photo_author",
+        "photo_provider",
+        "photo_license",
+    ):
+        if key in background_state:
+            metadata[key] = background_state[key]
 
     return PdfRenderResult(
         output_path=temp_path,

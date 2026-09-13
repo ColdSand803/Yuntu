@@ -3,6 +3,7 @@ import type { TripDay, TripPlace } from "@/types/trip";
 import { categoryIcon, isAnchorRole } from "@/constants/places";
 import { commuteModeName, commuteModeIcon, formatMinutes, formatDistance, cleanBrief } from "@/utils/format";
 import { periodLabel, governedExactTime, exactTimeSourceLabel } from "@/utils/schedule";
+import { ChevronRight, Clock, Lightbulb, ChevronDown } from "lucide-react";
 
 interface TimelineProps {
   day: TripDay;
@@ -117,8 +118,9 @@ export function Timeline({ day, activePlaceId, onPlaceClick }: TimelineProps) {
                         </span>
                       )}
                     </div>
-                    <i
-                      className={`fa-solid fa-chevron-right shrink-0 text-[10px] transition-transform ${
+                    <ChevronRight
+                      size={10}
+                      className={`shrink-0 transition-transform ${
                         isActive
                           ? "translate-x-0.5 text-primary-500"
                           : "text-gray-300 group-hover/place:translate-x-0.5 group-hover/place:text-primary-400"
@@ -130,7 +132,7 @@ export function Timeline({ day, activePlaceId, onPlaceClick }: TimelineProps) {
                   {/* 精确时间：仅受治理来源（reservation/event/transport/verified_venue_rule） */}
                   {exact && (
                     <div className="mt-1 flex items-center gap-1.5 pl-5 text-[11px] font-medium text-gray-600 tabular-nums">
-                      <i className="fa-regular fa-clock" aria-hidden="true" />
+                      <Clock size={12} aria-hidden="true" />
                       {exact.text}
                       <span className="rounded bg-primary-50 px-1 py-0.5 text-[10px] font-normal text-primary-600">
                         {exactTimeSourceLabel(exact.source)}
@@ -154,7 +156,9 @@ export function Timeline({ day, activePlaceId, onPlaceClick }: TimelineProps) {
               </div>
 
               {/* 通勤段：与上下景点拉开间距，作为两站之间的桥梁，而非上站附属 */}
-              {leg && (
+              {leg && (() => {
+                const LegIcon = commuteModeIcon(leg.mode);
+                return (
                 <div className="relative z-10 mt-3 mb-3 flex gap-4 py-1">
                   <div className="w-12 shrink-0" />
                   <div className="w-6 shrink-0" />
@@ -163,8 +167,9 @@ export function Timeline({ day, activePlaceId, onPlaceClick }: TimelineProps) {
                       className="flex shrink-0 whitespace-nowrap items-center gap-2 rounded-md border border-gray-100 px-2.5 py-1.5 text-[11px] font-medium text-gray-500 tabular-nums"
                       style={{ backgroundColor: "var(--color-bg-secondary)" }}
                     >
-                      <i
-                        className={`fa-solid ${commuteModeIcon(leg.mode)} text-[10px] text-gray-400`}
+                      <LegIcon
+                        size={10}
+                        className="text-gray-400"
                         aria-hidden="true"
                       />
                       {commuteModeName(leg.mode)} {formatMinutes(leg.duration_minutes)}
@@ -211,7 +216,8 @@ export function Timeline({ day, activePlaceId, onPlaceClick }: TimelineProps) {
                       ) : null)}
                   </div>
                 </div>
-              )}
+                );
+              })()}
             </div>
           );
         })}
@@ -227,11 +233,12 @@ export function Timeline({ day, activePlaceId, onPlaceClick }: TimelineProps) {
             aria-expanded={narrativeOpen}
           >
             <span className="flex items-center gap-2 text-[14px] font-bold text-amber-800">
-              <i className="fa-regular fa-lightbulb text-lg text-amber-500" aria-hidden="true" />
+              <Lightbulb size={18} className="text-amber-500" aria-hidden="true" />
               {narrativeOpen ? "当日游玩贴士" : "查看当日游玩贴士"}
             </span>
-            <i
-              className={`fa-solid fa-chevron-down text-[12px] text-amber-500 transition-transform md:hidden ${
+            <ChevronDown
+              size={12}
+              className={`text-amber-500 transition-transform md:hidden ${
                 narrativeOpen ? "rotate-180" : ""
               }`}
               aria-hidden="true"

@@ -266,6 +266,13 @@ _DIRECT_FACT_MARKERS = (
     "电梯",
     "索道",
     "咖啡",
+    "盖碗茶",
+    "下棋",
+    "划船",
+    "墙画",
+    "壁画",
+    "花店",
+    "书店",
     "休息",
     "午餐",
     "晚餐",
@@ -566,6 +573,34 @@ def _signal_from_rule(
     )
 
 
+# Do not sever operators that govern a following list, spatial clause or contrast.
+# Conservative: an ambiguous scope remains whole instead of gaining new claims.
+_EVIDENCE_SCOPE_RE = re.compile(
+    r"不|没|无|未|禁止|勿|别|仅|只|除非|如果|若|否则|但是|不过|虽然|而是|"
+    r"当.+时|期间|季节|春[季天]|夏[季天]|秋[季天]|冬[季天]|\d{1,2}月|"
+    r"之间|中间|附近|旁边|对面|相连|沿路|沿街|那里|那边|这里|其|它|"
+    r"从|沿着|位于|坐落|在.+(?:有|可以)|[→➡⏩]|->"
+)
+_FLOWER_STATE_RE = re.compile(r"花开了|开花了|正在开花|盛开|花已开|花都开|开满")
+_FLOWER_CONDITION_RE = re.compile(r"如果|若|当.+时|花期|春季|春天|夏季|秋季|冬季|\d{1,2}月")
+
+
+def has_evidence_scope(text: str) -> bool:
+    return bool(_EVIDENCE_SCOPE_RE.search(text))
+
+
+def unscoped_flower_observation(text: str) -> bool:
+    return bool(_FLOWER_STATE_RE.search(text) and not _FLOWER_CONDITION_RE.search(text))
+
+
+def independent_evidence_spans(text: str) -> list[str]:
+    """Split only unscoped statements; every returned span is source text."""
+    value = _clean_text(text)
+    if has_evidence_scope(value):
+        return [value] if value else []
+    return [part.strip() for part in re.split(r"[，,。；;、！？!?]+", value) if part.strip()]
+
+
 def _classify_signal(text: str, source: EvidenceSource) -> EvidenceSignal:
     text = _clean_text(text)
     if not text:
@@ -590,9 +625,23 @@ def _classify_signal(text: str, source: EvidenceSource) -> EvidenceSignal:
             risk_level="medium",
         )
 
+    if unscoped_flower_observation(text):
+        return EvidenceSignal(
+            text=text, source=source, strength="omitted",
+            reason="time_sensitive_observation", rule_id="l4_unscoped_flower_state",
+            rule_layer="L4_OMITTED",
+        )
+
     for rule in _EVIDENCE_RULES:
         marker = _rule_match(text, rule)
         if marker:
+            if (rule.strength == "direct_fact" and _FLOWER_STATE_RE.search(text)
+                    and _FLOWER_CONDITION_RE.search(text)):
+                return EvidenceSignal(
+                    text=text, source=source, strength="weak_experience",
+                    reason="conditional_observation", rule_id="l3_conditional_flower_state",
+                    rule_layer="L3_WEAK_EXPERIENCE",
+                )
             return _signal_from_rule(
                 text=text,
                 source=source,
@@ -814,11 +863,11 @@ def _authorized_actions_for_role(
         )
     if role in {"anchor_activity", "anchor"}:
         return (
-            "[INTERNAL 写作指引，勿输出] 当天重头戏，分配最多笔墨，写出在场感、节奏感和空间感，让读者能想象自己在这里逛的样子",
+            "[INTERNAL 写作指引，勿输出] 当天重点，有具体材料才展开，说明值得关注的内容；不因角色重要而凑字数",
         )
     if role in {"secondary_activity", "secondary"}:
         return (
-            "[INTERNAL 写作指引，勿输出] 次要停留，不用太长，写出精炼的看点和节奏控制",
+            "[INTERNAL 写作指引，勿输出] 次要停留，挑一项有依据的看点或行动简短说明",
         )
     return ()
 
@@ -833,11 +882,11 @@ def _fact_free_activity_actions(
 
     if normalized_type == "museum" or "博物馆" in tags:
         return (
-            "[INTERNAL 写作指引，勿输出] 博物馆/展馆类，写出选展区、看展品、在馆内放慢脚步的节奏感",
+            "[INTERNAL 写作指引，勿输出] 博物馆/展馆类，优先写授权材料中的展陈主题和看点；没有相关事实就简短给出参观建议",
         )
     if normalized_type == "park" or "公园" in tags:
         return (
-            "[INTERNAL 写作指引，勿输出] 公园类，写出散步、找地方坐下、感受自然和人间气息的松弛感",
+            "[INTERNAL 写作指引，勿输出] 公园类，优先写材料支持的活动或景观；喝茶、划船等具体体验不因公园主角色而删除",
         )
     if normalized_type == "market" or any(
         marker in tags for marker in ("市场", "市集", "菜市")
@@ -849,7 +898,7 @@ def _fact_free_activity_actions(
         marker in tags for marker in ("商业街", "商圈", "街区漫步")
     ):
         return (
-            "[INTERNAL 写作指引，勿输出] 商业街区类，写出沿街逛店、拐进支路发现小店、在街区漫步的闲逛感",
+            "[INTERNAL 写作指引，勿输出] 商业街区类，选材料支持的店铺类型或街区特色，不泛写随便逛逛",
         )
     if normalized_type == "photo_spot" or "拍照" in tags:
         return (
@@ -860,25 +909,25 @@ def _fact_free_activity_actions(
         for marker in ("街巷", "老城", "林荫路", "生活感")
     ):
         return (
-            "[INTERNAL 写作指引，勿输出] 街巷/老城类，写出在巷子里慢慢走、看门牌窗台旧墙这些细节的沉浸感",
+            "[INTERNAL 写作指引，勿输出] 街巷/老城类，只写材料支持的沿街看点，不凭类型补出门牌、窗台或旧墙",
         )
     if any(
         marker in tags
         for marker in ("历史建筑", "历史文化", "寺庙", "文化艺术")
     ):
         return (
-            "[INTERNAL 写作指引，勿输出] 历史建筑/文化类，写出绕着建筑看、观察细节做工、感受空间氛围的体验",
+            "[INTERNAL 写作指引，勿输出] 历史建筑/文化类，围绕授权背景或建筑看点展开，不凭类型补写构件",
         )
     if any(
         marker in tags
         for marker in ("自然风光", "观景", "夜景", "滨江", "湿地")
     ):
         return (
-            "[INTERNAL 写作指引，勿输出] 自然观景类，写出找个开阔位置停下来看、沿步道慢走、感受地形和光线变化的体验",
+            "[INTERNAL 写作指引，勿输出] 自然观景类，写清材料支持的观景对象与观察方式，不补步道、机位或光线条件",
         )
     if normalized_type in {"attraction", "photo_spot"}:
         return (
-            "[INTERNAL 写作指引，勿输出] 景点/游览类，写出按自己节奏逛、挑重点看、累了歇歇的自在感",
+            "[INTERNAL 写作指引，勿输出] 景点/游览类，优先选择当前地点的一项具体看点或活动，材料不足就短写",
         )
     return ()
 
@@ -891,8 +940,38 @@ def _fact_free_activity_actions(
 # must read naturally after "到{place}后，" in
 # completion_sentence_for_contract.
 _GENERIC_FALLBACK_ACTIONS: tuple[str, ...] = (
-    "[INTERNAL 写作指引，勿输出] 通用地点，按自己的节奏看看走走，写出轻松自在的在场感",
+    "选择感兴趣的部分游览，按体力决定参观范围",
+    "[INTERNAL 写作指引，勿输出] 缺少地点细节时简短说明，不添加景物、设施或空泛感受",
 )
+
+
+def first_publishable_action(
+    authorized_actions: tuple[str, ...],
+) -> str | None:
+    """Return first action not prefixed with [INTERNAL, or None if all are internal."""
+    for action in authorized_actions:
+        action_text = str(action or "").strip()
+        if action_text and not action_text.startswith("[INTERNAL"):
+            return action_text
+    return None
+
+
+def deterministic_actions_for_place(place: CandidatePlace) -> tuple[str, ...]:
+    """Type-supported suggestions; no invented facilities or external facts."""
+    kind = (place.place_type or "").strip().lower()
+    if kind == "museum":
+        return ("挑选感兴趣的主题参观，结合展品说明了解内容",)
+    if kind == "park":
+        return ("选择适合体力的路线散步，途中按需休息",)
+    if kind in {"street", "business_area", "commercial_area"}:
+        return ("沿街步行，观察沿途建筑的外观与细节",)
+    if kind == "photo_spot":
+        return ("选择取景方向，调整构图后拍摄",)
+    if kind in {"temple", "historic_building"}:
+        return ("观察建筑布局与外观细节，选择感兴趣的部分参观",)
+    if kind == "market":
+        return ("沿摊位浏览，按需挑选商品",)
+    return ()
 
 
 def authorized_actions_for_place(
@@ -927,8 +1006,10 @@ def authorized_actions_for_place(
         place.place_type,
         place.category_tags,
     )
-    combined = tuple(dict.fromkeys([*base, *type_actions]))
+    combined = tuple(dict.fromkeys([*deterministic_actions_for_place(place), *base, *type_actions]))
     if combined:
+        if first_publishable_action(combined) is None:
+            return (*_GENERIC_FALLBACK_ACTIONS, *combined)
         return combined
     # Role-miss plus type/tag-miss: never return an empty contract.
     return _GENERIC_FALLBACK_ACTIONS
@@ -1015,6 +1096,12 @@ def build_structured_evidence_payload(
     return payload
 
 
+def selector_experience_lines(place: CandidatePlace) -> list[str]:
+    """Only existing authorized positive evidence, bounded for Selector context."""
+    payload, _ = _place_payload(place)
+    return [line[:80] for line in [*payload.direct_facts, *payload.weak_experience][:2]]
+
+
 def has_forbidden_evaluation_word(text: str) -> bool:
     return bool(_contains_any(text or "", _FORBIDDEN_EVALUATION_WORDS))
 
@@ -1080,7 +1167,7 @@ def render_structured_evidence_prompt(
     lines = [
         f"{title}: version={payload.version}, classifier_fail_closed=true",
         "证据强度规则：direct_facts 可贴近原句复述；weak_experience 只能使用“整体/相对/适合/可以”等弱表达；risk_only_warnings 只能写成条件性风险提醒；not_authorized/omitted 不能写入攻略。",
-        "Mandatory Mention Policy：mandatory_mention=true 的地点必须出现在对应 Day 正文、Day 标题和 day_place_names 中；authorized_actions 是后端根据蓝图角色与地点类型给出的写作参考素材，不是必须照抄的句子——你可以用自己的表达替代，只要不编造事实。每个锁定地点至少写一个具体可执行动作；有 direct_facts/weak_experience 时把动作和可写信息结合。仅复述路线、通勤起终点或空壳停留句不算活动内容；动作不能扩成菜品、口味、价格、开放时间、历史年代、具体展品等可核验事实。基于地点类型写这类地方普遍会有的画面（街巷的石阶旧门面、滨江的江面江风、公园的绿意树荫、老厂房的梁柱层高）属于品类常识，不算编造，可以写；但不做可证伪的具体断言。",
+        "Mandatory Mention Policy：mandatory_mention=true 的地点必须出现在对应 Day 正文、Day 标题和 day_place_names 中；authorized_actions 是后端根据蓝图角色与地点类型给出的写作参考素材，不是必须照抄的句子——你可以用自己的表达替代，只要不编造事实。每个锁定地点至少写一个具体可执行动作；有 direct_facts/weak_experience 时把动作和可写信息结合。仅复述路线、通勤起终点或空壳停留句不算活动内容；动作不能扩成菜品、口味、价格、开放时间、历史年代、具体展品等可核验事实。地点类型可指导行动建议，不能证明这里一定有石阶、窗位、长椅、梁柱或特定景观；实际景物与设施仍须授权证据支持。有依据的细节可以自然描写，没有依据时缩短文字，不为补画面而增添事实。",
         "语言授权：可以/适合必须绑定证据强度、地点类型、路线或蓝图角色；建议/考虑只用于条件或约束；推荐/值得/很好/亮点/必去/宝藏默认禁用。",
     ]
     for place in payload.places:

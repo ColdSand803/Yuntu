@@ -1,11 +1,16 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { useEffect, useRef, useState } from "react";
 import AMapLoader from "@amap/amap-jsapi-loader";
 import type { TripDay, AccommodationInfo } from "@/types/trip";
 import { decodePolyline } from "@/utils/polyline";
 import { isAnchorRole } from "@/constants/places";
+import { getDayPalette } from "@/constants/mapPalette";
+import { MapPinned } from "lucide-react";
 
 interface MapViewProps {
-  day: TripDay;
+  day?: TripDay;
+  days?: TripDay[];
+  selectedDay?: number | "all";
   accommodation?: AccommodationInfo | null;
   activePlaceId?: number | null;
   onMarkerClick?: (placeId: number) => void;
@@ -18,21 +23,28 @@ const MODE_COLOR: Record<string, string> = {
   driving: "#1d9e91",
 };
 
-export function MapView({ day, accommodation, activePlaceId, onMarkerClick }: MapViewProps) {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function MapView({
+  day,
+  days,
+  selectedDay,
+  accommodation,
+  activePlaceId,
+  onMarkerClick,
+}: MapViewProps) {
   const mapRef = useRef<any>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const amapRef = useRef<any>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const satelliteRef = useRef<any>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const markersRef = useRef<any[]>([]);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const polylinesRef = useRef<any[]>([]);
   const [error, setError] = useState(false);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<"standard" | "satellite">("standard");
   const containerRef = useRef<HTMLDivElement>(null);
+
+  const isAllDays = selectedDay === "all" || (!day && Boolean(days && days.length > 0));
+  const renderDays: TripDay[] = isAllDays && days && days.length > 0
+    ? days
+    : (day ? [day] : (days && days.length > 0 ? [days[0]] : []));
 
   function toggleView(next: "standard" | "satellite") {
     const AMap = amapRef.current;
@@ -61,7 +73,6 @@ export function MapView({ day, accommodation, activePlaceId, onMarkerClick }: Ma
     // 新版高德 Web JS API 需要安全密钥配对（本地明文，上线改后端代理）
     const security = import.meta.env.VITE_AMAP_SECURITY;
     if (security) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (window as any)._AMapSecurityConfig = { securityJsCode: security };
     }
 
@@ -76,8 +87,8 @@ export function MapView({ day, accommodation, activePlaceId, onMarkerClick }: Ma
         });
         mapRef.current = map;
 
-        updateMarkers(AMap, map, day, accommodation, activePlaceId, onMarkerClick, markersRef);
-        updatePolylines(AMap, map, day, polylinesRef);
+        updateMarkers(AMap, map, renderDays, isAllDays, accommodation, activePlaceId, onMarkerClick, markersRef);
+        updatePolylines(AMap, map, renderDays, isAllDays, polylinesRef);
         fitView(map);
         setLoading(false);
       })
@@ -95,18 +106,18 @@ export function MapView({ day, accommodation, activePlaceId, onMarkerClick }: Ma
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // day/accommodation 变化：重建全部覆盖物并 fitView 全览
+  // renderDays/accommodation 变化：重建全部覆盖物并 fitView 全览
   useEffect(() => {
     const AMap = amapRef.current;
     const map = mapRef.current;
     if (!AMap || !map) return;
 
     clearOverlays(markersRef, polylinesRef);
-    updateMarkers(AMap, map, day, accommodation, activePlaceId, onMarkerClick, markersRef);
-    updatePolylines(AMap, map, day, polylinesRef);
+    updateMarkers(AMap, map, renderDays, isAllDays, accommodation, activePlaceId, onMarkerClick, markersRef);
+    updatePolylines(AMap, map, renderDays, isAllDays, polylinesRef);
     fitView(map);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [day, accommodation]);
+  }, [selectedDay, day, days, accommodation]);
 
   // activePlaceId 变化：重建 marker 更新高亮，并平移到选中点（不重置缩放）
   useEffect(() => {
@@ -115,10 +126,17 @@ export function MapView({ day, accommodation, activePlaceId, onMarkerClick }: Ma
     if (!AMap || !map) return;
 
     clearOverlays(markersRef, polylinesRef);
-    updateMarkers(AMap, map, day, accommodation, activePlaceId, onMarkerClick, markersRef);
-    updatePolylines(AMap, map, day, polylinesRef);
+    updateMarkers(AMap, map, renderDays, isAllDays, accommodation, activePlaceId, onMarkerClick, markersRef);
+    updatePolylines(AMap, map, renderDays, isAllDays, polylinesRef);
 
-    const active = day.places.find((p) => p.place_id === activePlaceId);
+    let active: { longitude?: number; latitude?: number } | undefined;
+    for (const d of renderDays) {
+      const found = d.places.find((p) => p.place_id === activePlaceId);
+      if (found) {
+        active = found;
+        break;
+      }
+    }
     if (active?.longitude && active?.latitude) {
       map.panTo([active.longitude, active.latitude], 250);
     }
@@ -148,7 +166,7 @@ export function MapView({ day, accommodation, activePlaceId, onMarkerClick }: Ma
   if (error)
     return (
       <div className="card flex h-full w-full flex-col items-center justify-center gap-3 bg-primary-50/30 p-6 text-center">
-        <i className="fa-solid fa-map-location-dot text-3xl text-primary-200" aria-hidden="true" />
+        <MapPinned size={30} className="text-primary-200" aria-hidden="true" />
         <p className="text-sm font-medium text-gray-600">地图加载失败</p>
         <p className="text-xs text-gray-400">行程信息不受影响，可刷新页面重试</p>
         <button
@@ -192,15 +210,31 @@ export function MapView({ day, accommodation, activePlaceId, onMarkerClick }: Ma
         </button>
       </div>
 
-      <div className="absolute bottom-2 right-2 rounded-lg bg-white/80 px-2.5 py-1 text-[10px] text-sand-500 backdrop-blur-sm">
-        路线顺序示意图
+      {/* 全程总览状态指示 - 提升到 bottom-7 避开高德左下角版权水印 */}
+      {isAllDays && renderDays.length > 0 && (
+        <div className="absolute bottom-7 left-3 z-[60] flex items-center gap-1.5 rounded-xl bg-gray-900/85 px-3 py-1.5 text-[11px] font-medium text-white shadow-lg backdrop-blur-md border border-white/10">
+          <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse shadow-sm" />
+          <span>全程总览：共 {renderDays.length} 天 · {renderDays.reduce((acc, d) => acc + d.places.length, 0)} 个地点</span>
+        </div>
+      )}
+
+      <div className="absolute bottom-7 right-3 z-[60] rounded-xl bg-white/90 px-3 py-1 text-[11px] font-medium text-sand-600 shadow-md backdrop-blur-md border border-gray-100">
+        {isAllDays ? "多日全景轨迹" : "路线顺序示意图"}
       </div>
     </div>
   );
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function updateMarkers(AMap: any, map: any, day: TripDay, accommodation: AccommodationInfo | null | undefined, activePlaceId: number | null | undefined, onMarkerClick: ((id: number) => void) | undefined, markersRef: React.MutableRefObject<any[]>) {
+function updateMarkers(
+  AMap: any,
+  map: any,
+  renderDays: TripDay[],
+  isAllDays: boolean,
+  accommodation: AccommodationInfo | null | undefined,
+  activePlaceId: number | null | undefined,
+  onMarkerClick: ((id: number) => void) | undefined,
+  markersRef: React.MutableRefObject<any[]>
+) {
   // 如果有住宿建议且坐标有效，绘制住宿锚点 Marker
   if (accommodation && accommodation.longitude && accommodation.latitude) {
     const isUserSpecified = accommodation.source === "user_specified";
@@ -216,113 +250,161 @@ function updateMarkers(AMap: any, map: any, day: TripDay, accommodation: Accommo
       position: [accommodation.longitude, accommodation.latitude],
       zIndex: 150,
       content: `
-        <div style="display:flex;align-items:center;gap:5px;transform:translate(-${dot / 2}px,-${dot / 2}px);white-space:nowrap;cursor:pointer">
-          <div style="width:${dot}px;height:${dot}px;border-radius:50%;background:${bg};color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;box-shadow:0 2px 6px rgba(0,0,0,.3);border:${ring}px solid #fff">🏨</div>
-          <div style="font-size:12px;font-weight:700;color:${nameColor};background:${nameBg};border:1px solid ${nameBorder};border-radius:8px;padding:2px 7px;box-shadow:0 1px 4px rgba(0,0,0,.15);backdrop-filter:blur(2px)">
+        <div style="display:flex;align-items:center;gap:4px;transform:translate(-${dot / 2}px,-${dot / 2}px);white-space:nowrap;cursor:pointer">
+          <div style="width:${dot}px;height:${dot}px;border-radius:50%;background:${bg};color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;box-shadow:0 2px 8px rgba(0,0,0,.25);border:${ring}px solid #fff">🏨</div>
+          <div style="font-size:11.5px;font-weight:700;color:${nameColor};background:${nameBg};border:1px solid ${nameBorder};border-radius:7px;padding:2px 6.5px;box-shadow:0 2px 8px rgba(0,0,0,.15);backdrop-filter:blur(4px)">
             <span style="font-size:10px;opacity:0.85;margin-right:3px;">[${tagText}]</span>${accommodation.name}
           </div>
         </div>`,
       offset: new AMap.Pixel(0, 0),
     });
 
+    accMarker.on("mouseover", () => accMarker.setzIndex(9999));
+    accMarker.on("mouseout", () => accMarker.setzIndex(150));
+
     map.add(accMarker);
     markersRef.current.push(accMarker);
   }
 
-  day.places.forEach((place, i) => {
-    if (!place.longitude || !place.latitude) return;
+  // 记录已放置的 Marker 坐标与垂直位移，实现临近点智能错位（防压字遮挡）
+  const placedPins: { lng: number; lat: number; yShift: number }[] = [];
 
-    const isActive = place.place_id === activePlaceId;
-    const isAnchor = isAnchorRole(place.role);
-    const bg = isActive ? "#0c625b" : isAnchor ? "#0f766e" : "#fb923c";
-    // 选中态：圆点放大、白描边加粗、整块加阴影与边框高亮
-    const dot = isActive ? 30 : 24;
-    const ring = isActive ? 3 : 2;
-    const nameWeight = isActive ? 700 : 600;
-    const nameColor = isActive ? "#0a4f49" : "#374151";
-    const nameBg = isActive ? "#eef9f7" : "rgba(255,255,255,.92)";
-    const nameBorder = isActive ? "#6ec6bb" : "#e5e7eb";
+  renderDays.forEach((currentDay) => {
+    const palette = getDayPalette(currentDay.day);
 
-    const marker = new AMap.Marker({
-      position: [place.longitude, place.latitude],
-      // 选中项提到最上层，避免被其它 marker 名称遮住
-      zIndex: isActive ? 200 : 100,
-      content: `
-        <div style="display:flex;align-items:center;gap:5px;transform:translate(-${dot / 2}px,-${dot / 2}px);white-space:nowrap;cursor:pointer">
-          <div style="width:${dot}px;height:${dot}px;border-radius:50%;background:${bg};color:#fff;display:flex;align-items:center;justify-content:center;font-size:${isActive ? 14 : 12}px;font-weight:700;box-shadow:0 2px 6px rgba(0,0,0,.28);border:${ring}px solid #fff">${i + 1}</div>
-          <div style="font-size:12px;font-weight:${nameWeight};color:${nameColor};background:${nameBg};border:1px solid ${nameBorder};border-radius:8px;padding:2px 7px;box-shadow:0 1px 4px rgba(0,0,0,.12);backdrop-filter:blur(2px)">${place.name}</div>
-        </div>`,
-      offset: new AMap.Pixel(0, 0),
+    currentDay.places.forEach((place, i) => {
+      if (!place.longitude || !place.latitude) return;
+
+      const isActive = place.place_id === activePlaceId;
+      const isAnchor = isAnchorRole(place.role);
+      const label = isAllDays ? `D${currentDay.day}-${i + 1}` : `${i + 1}`;
+
+      // 计算与已有标记点的经纬度距离，如果在屏幕/经纬度尺度上极度接近（< 0.012度，约1km内），进行上下智能错位
+      let yShift = 0;
+      for (const p of placedPins) {
+        const dLng = Math.abs(place.longitude - p.lng);
+        const dLat = Math.abs(place.latitude - p.lat);
+        if (dLng < 0.012 && dLat < 0.010) {
+          yShift = p.yShift <= 0 ? 24 : -24;
+          break;
+        }
+      }
+      placedPins.push({ lng: place.longitude, lat: place.latitude, yShift });
+
+      const bg = isActive
+        ? (isAllDays ? palette.dark : "#0c625b")
+        : (isAllDays ? palette.primary : (isAnchor ? "#0f766e" : "#fb923c"));
+
+      const dotWidth = isAllDays ? (label.length > 4 ? 40 : 34) : (isActive ? 30 : 24);
+      const dotHeight = isAllDays ? 22 : (isActive ? 30 : 24);
+      const borderRadius = isAllDays ? "11px" : "50%";
+      const ring = isActive ? 3 : 2;
+      const nameWeight = isActive ? 700 : 600;
+      const nameColor = isActive ? (isAllDays ? palette.dark : "#0a4f49") : "#374151";
+      const nameBg = isActive ? (isAllDays ? palette.lightBg : "#eef9f7") : "rgba(255,255,255,.96)";
+      const nameBorder = isActive ? (isAllDays ? palette.border : "#6ec6bb") : "#e5e7eb";
+      const baseZIndex = isActive ? 500 : (100 + currentDay.day * 20 + i);
+
+      const marker = new AMap.Marker({
+        position: [place.longitude, place.latitude],
+        // 选中项提到最上层，避免被其它 marker 名称遮住
+        zIndex: baseZIndex,
+        content: `
+          <div style="display:flex;align-items:center;gap:4px;transform:translate(-${dotWidth / 2}px,calc(-${dotHeight / 2}px + ${yShift}px));white-space:nowrap;cursor:pointer">
+            <div style="min-width:${dotWidth}px;height:${dotHeight}px;padding:0 4px;border-radius:${borderRadius};background:${bg};color:#fff;display:flex;align-items:center;justify-content:center;font-size:${isAllDays ? 11 : (isActive ? 14 : 12)}px;font-weight:700;box-shadow:0 2px 8px rgba(0,0,0,.25);border:${ring}px solid #fff;letter-spacing:-0.2px">${label}</div>
+            <div style="font-size:11.5px;font-weight:${nameWeight};color:${nameColor};background:${nameBg};border:1px solid ${nameBorder};border-radius:7px;padding:2px 6.5px;box-shadow:0 2px 8px rgba(0,0,0,.15);backdrop-filter:blur(4px);max-width:130px;overflow:hidden;text-overflow:ellipsis">${place.name}</div>
+          </div>`,
+        offset: new AMap.Pixel(0, 0),
+      });
+
+      marker.on("mouseover", () => marker.setzIndex(9999));
+      marker.on("mouseout", () => marker.setzIndex(baseZIndex));
+
+      marker.on("click", () => onMarkerClick?.(place.place_id));
+      map.add(marker);
+      markersRef.current.push(marker);
     });
-
-    marker.on("click", () => onMarkerClick?.(place.place_id));
-    map.add(marker);
-    markersRef.current.push(marker);
   });
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function updatePolylines(AMap: any, map: any, day: TripDay, polylinesRef: React.MutableRefObject<any[]>) {
-  day.commute_legs.forEach((leg) => {
-    const from = day.places.find((p) => p.place_id === leg.from_place_id);
-    const to = day.places.find((p) => p.place_id === leg.to_place_id);
-    if (!from?.longitude || !to?.longitude) return;
+function updatePolylines(
+  AMap: any,
+  map: any,
+  renderDays: TripDay[],
+  isAllDays: boolean,
+  polylinesRef: React.MutableRefObject<any[]>
+) {
+  renderDays.forEach((currentDay) => {
+    const palette = getDayPalette(currentDay.day);
 
-    let path: [number, number][];
-    let hasRealRoute = false;
+    currentDay.commute_legs.forEach((leg) => {
+      const from = currentDay.places.find((p) => p.place_id === leg.from_place_id);
+      const to = currentDay.places.find((p) => p.place_id === leg.to_place_id);
+      if (!from?.longitude || !to?.longitude) return;
 
-    if (leg.encoded_polyline) {
-      try {
-        path = decodePolyline(leg.encoded_polyline);
-        hasRealRoute = true;
-      } catch {
+      let path: [number, number][];
+      let hasRealRoute = false;
+
+      if (leg.encoded_polyline) {
+        try {
+          const decoded = decodePolyline(leg.encoded_polyline);
+          if (decoded.length >= 2) {
+            path = decoded;
+            hasRealRoute = true;
+          } else {
+            path = [
+              [from.longitude, from.latitude],
+              [to.longitude, to.latitude],
+            ];
+          }
+        } catch {
+          path = [
+            [from.longitude, from.latitude],
+            [to.longitude, to.latitude],
+          ];
+        }
+      } else {
         path = [
           [from.longitude, from.latitude],
           [to.longitude, to.latitude],
         ];
       }
-    } else {
-      path = [
-        [from.longitude, from.latitude],
-        [to.longitude, to.latitude],
-      ];
-    }
 
-    const color = MODE_COLOR[leg.mode] ?? "#94a3b8";
+      const color = isAllDays ? palette.primary : (MODE_COLOR[leg.mode] ?? "#94a3b8");
 
-    // 底层：白色描边线（比主线更粗），让彩色路线在地图底图上跳得出来——竞品(高德)的关键手法
-    const outline = new AMap.Polyline({
-      path,
-      strokeColor: "#ffffff",
-      strokeWeight: 9,
-      strokeOpacity: 0.9,
-      lineJoin: "round",
-      lineCap: "round",
-      zIndex: 50,
+      // 底层：白色描边线（比主线更粗），让彩色路线在地图底图上跳得出来——竞品(高德)的关键手法
+      const outline = new AMap.Polyline({
+        path,
+        strokeColor: "#ffffff",
+        strokeWeight: 9,
+        strokeOpacity: 0.9,
+        lineJoin: "round",
+        lineCap: "round",
+        zIndex: 50,
+      });
+      map.add(outline);
+      polylinesRef.current.push(outline);
+
+      // 上层：彩色实线 + 方向箭头。无真实路网(直线段)用虚线区分"非实际路径"，但仍加粗醒目
+      const polyline = new AMap.Polyline({
+        path,
+        strokeColor: color,
+        strokeWeight: 6,
+        strokeStyle: hasRealRoute ? "solid" : "dashed",
+        strokeOpacity: 0.95,
+        strokeDasharray: hasRealRoute ? undefined : [12, 6],
+        showDir: true, // 行进方向箭头，一眼看出走向
+        lineJoin: "round",
+        lineCap: "round",
+        zIndex: 51 + currentDay.day,
+      });
+
+      map.add(polyline);
+      polylinesRef.current.push(polyline);
     });
-    map.add(outline);
-    polylinesRef.current.push(outline);
-
-    // 上层：彩色实线 + 方向箭头。无真实路网(直线段)用虚线区分"非实际路径"，但仍加粗醒目
-    const polyline = new AMap.Polyline({
-      path,
-      strokeColor: color,
-      strokeWeight: 6,
-      strokeStyle: hasRealRoute ? "solid" : "dashed",
-      strokeOpacity: 0.95,
-      strokeDasharray: hasRealRoute ? undefined : [12, 6],
-      showDir: true, // 行进方向箭头，一眼看出走向
-      lineJoin: "round",
-      lineCap: "round",
-      zIndex: 51,
-    });
-
-    map.add(polyline);
-    polylinesRef.current.push(polyline);
   });
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function clearOverlays(markersRef: React.MutableRefObject<any[]>, polylinesRef: React.MutableRefObject<any[]>) {
   markersRef.current.forEach((m) => m.setMap(null));
   polylinesRef.current.forEach((p) => p.setMap(null));
@@ -330,7 +412,6 @@ function clearOverlays(markersRef: React.MutableRefObject<any[]>, polylinesRef: 
   polylinesRef.current = [];
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function fitView(map: any) {
   setTimeout(() => {
     map.setFitView(null, false, [40, 40, 40, 40], 300);

@@ -9,6 +9,7 @@ from src.agents.pace import (
     single_leg_max_minutes,
 )
 from src.agents.route_planning import _legs, _nearest_neighbor, _within_budget
+from src.agents.route_feasibility import DayContext, evaluate_day, POLICY_VERSION
 from src.agents.schema import (
     BudgetDayResult,
     BudgetResult,
@@ -249,6 +250,17 @@ def resolve_route_budgets(
     )
     results: list[BudgetResult] = []
     for route_plan in route_plans:
+        if route_plan.route_policy_version == POLICY_VERSION:
+            days = []
+            for day in route_plan.day_groups:
+                check = evaluate_day(day.places, day.commute_legs, day.access_legs, DayContext(request, settings, day.traffic_policy))
+                # Read-only verification: stored load and order must match the locked facts.
+                valid = check.feasible and check == day.day_feasibility and day.commute_minutes == check.poi_commute_minutes + (check.access_minutes or 0)
+                days.append(BudgetDayResult(day=day.day, status="within_budget" if valid else "infeasible",
+                    budget_minutes=day.traffic_policy.daily_limit_minutes if day.traffic_policy else budget_minutes, commute_minutes=check.poi_commute_minutes + (check.access_minutes or 0),
+                    reason="locked_route_v2" if valid else "route_v2_feasibility_mismatch"))
+            results.append(BudgetResult(plan_label=route_plan.label, days=days))
+            continue
         day_results: list[BudgetDayResult] = []
         retained_days = []
         for day_group in route_plan.day_groups:

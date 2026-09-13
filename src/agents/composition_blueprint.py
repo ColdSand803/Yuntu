@@ -79,7 +79,13 @@ def _light_food_kind(place: CandidatePlace) -> str | None:
         return "coffee"
     if place_type in SNACK_TYPES:
         return "snack"
-    if _has_full_meal_evidence(place):
+    # A service mentioned inside a museum/park/street does not own its role.
+    # Keyword inference is only for untyped candidates and their identity name;
+    # recommendation prose and warnings can contain negation or nearby shops.
+    if place_type not in {"", "other"}:
+        return None
+    text = place.name.lower()
+    if any(marker in text for marker in FULL_MEAL_MARKERS):
         return None
     if any(marker in text for marker in COFFEE_MARKERS):
         return "coffee"

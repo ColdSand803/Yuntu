@@ -19,22 +19,7 @@ import type { TripFormData, MustIncludeItem, RequestedCommuteMode } from "@/type
 import { usesBundledCityAssets } from "@/config/cityAssets";
 
 const SUPPORTED_CITIES = [
-  { name: "杭州", tag: "烟雨江南 · 西子湖畔" },
   { name: "重庆", tag: "立体山城 · 赛博夜景" },
-  { name: "成都", tag: "天府之国 · 慢享生活" },
-  { name: "西安", tag: "十三朝古都 · 丝路起点" },
-  { name: "北京", tag: "千年古都 · 皇家气韵" },
-  { name: "上海", tag: "摩登海派 · 璀璨江景" },
-  { name: "南京", tag: "六朝古都 · 金陵风雅" },
-  { name: "长沙", tag: "星城烟火 · 时尚长歌" },
-  { name: "青岛", tag: "红瓦绿树 · 碧海蓝天" },
-  { name: "桂林", tag: "山水甲天下 · 漓江美景" },
-  { name: "广州", tag: "岭南花城 · 珠江烟火" },
-  { name: "武汉", tag: "江城相逢 · 湖光桥影" },
-  { name: "苏州", tag: "园林水巷 · 吴韵江南" },
-  { name: "厦门", tag: "鹭岛海风 · 闽南慢调" },
-  { name: "昆明", tag: "四季春城 · 云南风物" },
-  { name: "三亚", tag: "热带海岛 · 椰风海韵" },
 ];
 
 const PREFERENCE_OPTIONS = [
@@ -466,10 +451,17 @@ export default function InputPage() {
           <nav className="hidden sm:flex items-center space-x-2 text-xs font-semibold">
             <Link
               to="/"
+              className="inline-flex items-center gap-1.5 text-white/80 hover:text-white px-3 py-1.5 rounded-lg backdrop-blur-md border border-white/10 hover:border-white/25 transition-all"
+            >
+              <i className="fa-solid fa-map text-emerald-400 text-[11px]" />
+              <span>山河地图</span>
+            </Link>
+            <Link
+              to="/classic"
               className="inline-flex items-center gap-1.5 text-white bg-white/20 px-3 py-1.5 rounded-lg backdrop-blur-md border border-white/25 shadow-xs"
             >
               <i className="fa-solid fa-compass text-emerald-400 text-[11px]" />
-              <span>行程规划</span>
+              <span>经典模式</span>
             </Link>
           </nav>
         </div>

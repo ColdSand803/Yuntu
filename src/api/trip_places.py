@@ -11,6 +11,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import text
 
+from src.api.poi_catalog import (
+    PoiCatalogResponse,
+    PoiCatalogValidationError,
+    PoiSelectionResponse,
+    normalize_catalog_city,
+    query_poi_catalog,
+    query_poi_selection,
+)
 from src.api.public_guard import (
     verify_bff_internal_credential,
     verify_public_api_client,
@@ -57,7 +65,7 @@ class PlaceUnsupported(Exception):
 
 
 class GalleryVariant(BaseModel):
-    url: str = Field(pattern=r"^https?://\S+\.webp$")
+    url: str = Field(pattern=r"^https://assets\.kakarot8\.com/\S+\.webp$")
     width: int = Field(gt=0)
     height: int = Field(gt=0)
 
@@ -485,3 +493,57 @@ async def trip_place(place_id: int = Path(..., ge=1)):
 @internal_router.get("/trip/places/{place_id}", response_model=PlaceDetailResponse)
 async def internal_trip_place(place_id: int = Path(..., ge=1)):
     return await _trip_place_response(place_id)
+
+
+def _poi_catalog_http_error(exc: PoiCatalogValidationError) -> HTTPException:
+    return HTTPException(status_code=422, detail=str(exc))
+
+
+async def _canonical_poi_catalog_city(city: str) -> str:
+    try:
+        requested = normalize_catalog_city(city)
+    except PoiCatalogValidationError as exc:
+        raise _poi_catalog_http_error(exc) from exc
+    resolved = await resolve_city(requested)
+    if resolved is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "POI_CATALOG_CITY_NOT_FOUND",
+                "message": "City is not available",
+            },
+        )
+    return resolved.canonical_name
+
+
+@router.get("/trip/poi-catalog", response_model=PoiCatalogResponse)
+@internal_router.get("/trip/poi-catalog", response_model=PoiCatalogResponse)
+async def internal_poi_catalog(
+    city: str = Query(...),
+    q: str | None = Query(default=""),
+    after_id: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=50),
+) -> PoiCatalogResponse:
+    canonical_city = await _canonical_poi_catalog_city(city)
+    try:
+        return await query_poi_catalog(
+            city=canonical_city,
+            q=q,
+            after_id=after_id,
+            limit=limit,
+        )
+    except PoiCatalogValidationError as exc:
+        raise _poi_catalog_http_error(exc) from exc
+
+
+@router.get("/trip/poi-catalog/selection", response_model=PoiSelectionResponse)
+@internal_router.get("/trip/poi-catalog/selection", response_model=PoiSelectionResponse)
+async def internal_poi_catalog_selection(
+    city: str = Query(...),
+    place_ids: list[int] = Query(..., min_length=1, max_length=5),
+) -> PoiSelectionResponse:
+    canonical_city = await _canonical_poi_catalog_city(city)
+    try:
+        return await query_poi_selection(city=canonical_city, place_ids=place_ids)
+    except PoiCatalogValidationError as exc:
+        raise _poi_catalog_http_error(exc) from exc

@@ -179,6 +179,16 @@ export interface AccommodationInfo {
   reason?: string | null;
 }
 
+export interface PackingChecklistGroup {
+  category: string;
+  items: string[];
+}
+
+export interface TravelTip {
+  title: string;
+  content: string;
+}
+
 export interface TripPlan {
   plan_id: string;
   title: string;
@@ -193,6 +203,10 @@ export interface TripPlan {
   transport?: TripTransport | null;
   cost_estimate: CostEstimateSummary;
   days: TripDay[];
+  /** Schema 2.2：行前必备清单（分类列表，每类最多3项，最多4类） */
+  packing_checklist?: PackingChecklistGroup[] | null;
+  /** Schema 2.2：实用避坑贴士（0～4条） */
+  travel_tips?: TravelTip[] | null;
 }
 
 export interface TransportOption {

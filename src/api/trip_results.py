@@ -13,10 +13,20 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError
 from sqlalchemy import text
 
+from src.agents.pretrip_advice import project_public_plan_advice
 from src.agents.route_planning import classify_transit_detail, format_transit_summary
-from src.agents.schema import DeliveryStatus, PublishedVariant, TransitStep
+from src.agents.route_feasibility import access_status, access_summary
+from src.agents.schema import RouteDayGroup
+from src.agents.schema import (
+    DeliveryStatus,
+    PackingChecklistGroup,
+    PublishedVariant,
+    TransitStep,
+    TravelTip,
+)
 from src.agents.weather_advisory import is_weather_line
 from src.api.public_guard import verify_public_api_client
+from src.config import get_settings
 from src.cost_estimate.public import (
     CostEstimateProjectionError,
     CostEstimateSummary,
@@ -206,10 +216,12 @@ class ResultPlan(BaseModel):
     transport: ResultTransport | None = None
     days: list[ResultDay]
     cost_estimate: CostEstimateSummary
+    packing_checklist: list[PackingChecklistGroup] | None = None
+    travel_tips: list[TravelTip] | None = None
 
 
 class TripResultResponse(BaseModel):
-    schema_version: Literal["2.1"]
+    schema_version: Literal["2.1", "2.2"]
     published_variant: PublishedVariant
     delivery_status: DeliveryStatus
     result_id: int
@@ -679,8 +691,6 @@ def _project_commute_leg(leg: dict[str, Any]) -> ResultCommuteLeg:
         else "estimate"
     )
     encoded_polyline = str(leg.get("encoded_polyline") or "")
-    if mode != "driving":
-        encoded_polyline = ""
     transit_steps: list[ResultTransitStep] | None = None
     transit_summary: str | None = None
     if mode == "transit":
@@ -792,11 +802,52 @@ def _project_days(plan: dict[str, Any]) -> list[ResultDay]:
             "multi-place day requires commute_legs",
         )
         commute_minutes = _to_int(day_group.get("commute_minutes"))
+        locked_v2 = None
+        if route_plan.get("route_policy_version") == "selector-route-v2":
+            try:
+                locked_v2 = RouteDayGroup.model_validate(day_group)
+            except (ValueError, TypeError) as exc:
+                raise ResultContractUnsupported("invalid persisted v2 day") from exc
+            ids = [p.place_id for p in locked_v2.places]
+            _assert_result_contract(
+                [(l.from_place_id, l.to_place_id) for l in locked_v2.commute_legs] == list(zip(ids, ids[1:])),
+                "v2 POI legs must match the locked order",
+            )
+            _assert_result_contract(
+                locked_v2.day_feasibility is not None and locked_v2.day_feasibility.feasible
+                and locked_v2.day_feasibility.ordered_place_ids == ids,
+                "v2 persisted feasibility is required",
+            )
+            access = {leg.direction: leg for leg in locked_v2.access_legs}
+            _assert_result_contract(
+                not locked_v2.access_legs or (
+                    len(locked_v2.access_legs) == 2 and set(access) == {"outbound", "inbound"}
+                    and access["outbound"].place_id == ids[0] and access["inbound"].place_id == ids[-1]
+                    and len({(a.anchor_source, a.anchor_latitude, a.anchor_longitude) for a in locked_v2.access_legs}) == 1
+                ), "v2 accommodation access must match locked endpoints",
+            )
+            fact = locked_v2.day_feasibility
+            _assert_result_contract(
+                fact.access_status == access_status(locked_v2.access_legs)
+                and fact.access_minutes == (sum(a.duration_minutes for a in access.values()) if access else None)
+                and fact.poi_commute_minutes == sum(l.duration_minutes for l in locked_v2.commute_legs),
+                "v2 persisted commute breakdown must agree",
+            )
+            _assert_result_contract(
+                commute_minutes == sum(l.duration_minutes for l in locked_v2.commute_legs) + sum(l.duration_minutes for l in locked_v2.access_legs),
+                "v2 commute total must include access",
+            )
         commute_notes = [
             str(note).strip()
             for note in day_group.get("commute_notes") or []
             if str(note).strip()
         ]
+        if locked_v2 is not None:
+            # Read persisted facts independently of the current generation feature flag.
+            commute_notes = [leg.note for leg in locked_v2.commute_legs if leg.note]
+            summary = access_summary(locked_v2)
+            if summary:
+                commute_notes.append(summary)
         title = (
             day_titles.get(day_number)
             or str(day_group.get("area") or "").strip()
@@ -834,6 +885,7 @@ def _project_plan(
     people_count: int,
     from_city_present: bool,
     requested_commute_mode: Literal["driving", "transit", "cycling"],
+    schema_22_enabled: bool | None = None,
 ) -> ResultPlan:
     _assert_result_contract(isinstance(plan, dict), "plan must be an object")
     days = _project_days(plan)
@@ -852,6 +904,9 @@ def _project_plan(
             _to_int(day_group.get("commute_minutes"))
             for day_group in (plan.get("route_plan") or {}).get("day_groups") or []
         )
+    if (plan.get("route_plan") or {}).get("route_policy_version") == "selector-route-v2":
+        total_commute = sum(_to_int(group.get("commute_minutes"))
+                            for group in plan["route_plan"]["day_groups"])
     avg_commute = total_commute / max(len(days), 1)
     if avg_commute <= 90:
         pace_level: PaceLevel = "RELAXED"
@@ -880,6 +935,10 @@ def _project_plan(
         )
     except CostEstimateProjectionError as exc:
         raise ResultContractUnsupported(str(exc)) from exc
+    packing_checklist, travel_tips = project_public_plan_advice(
+        plan,
+        schema_22_enabled=schema_22_enabled,
+    )
     return ResultPlan(
         plan_id=f"plan_{chr(ord('a') + index)}",
         title=title,
@@ -898,6 +957,8 @@ def _project_plan(
         transport=_project_transport(plan),
         days=days,
         cost_estimate=cost_estimate,
+        packing_checklist=packing_checklist,
+        travel_tips=travel_tips,
     )
 
 
@@ -1049,6 +1110,10 @@ def project_trip_result(row: Any) -> TripResultResponse:
     _assert_result_contract(people_count > 0, "request people_count is required")
     requested_commute_mode = _persisted_cost_request_mode(quality_metrics)
     from_city_present = bool(str(row.from_city or "").strip())
+    # One explicit flag decision controls the complete projection: false emits
+    # Schema 2.1 and omits advice even if stored; true emits 2.2 and projects
+    # valid plan advice. Historical rows without advice stay readable either way.
+    schema_22_enabled = bool(get_settings().result_schema_22_enabled)
     projected_plans = [
         _project_plan(
             index=index,
@@ -1058,12 +1123,13 @@ def project_trip_result(row: Any) -> TripResultResponse:
             people_count=people_count,
             from_city_present=from_city_present,
             requested_commute_mode=requested_commute_mode,
+            schema_22_enabled=schema_22_enabled,
         )
         for index, plan in enumerate(plans)
     ]
     _assert_result_contract(len(projected_plans) == len(plans), "all plans must project")
     result = TripResultResponse(
-        schema_version="2.1",
+        schema_version="2.2" if schema_22_enabled else "2.1",
         published_variant=published_variant,
         delivery_status=delivery_status,
         result_id=int(row.id),

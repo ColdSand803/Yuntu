@@ -14,9 +14,17 @@ logging.basicConfig(
 
 
 async def main(query: str) -> None:
+    from src.agents.intent_parser import parse_intent_with_metadata
     from src.agents.workflow import run_trip_workflow
 
-    result = await run_trip_workflow(query)
+    print("\n" + "=" * 60)
+    print(f"[1/2] 正在解析出行意图: '{query}' ...")
+    trip_req, _ = await parse_intent_with_metadata(query)
+    print(f"意图解析成功: 目的地={trip_req.to_city}, 天数={trip_req.days}, 偏好={trip_req.preferences}")
+    print("=" * 60)
+
+    print("\n[2/2] 开始执行全链路旅行规划与排程引擎...")
+    result = await run_trip_workflow(query, trip_request=trip_req)
 
     print("\n" + "=" * 60)
     print(f"目的地: {result.trip_request.to_city}  天数: {result.trip_request.days}")
@@ -36,7 +44,7 @@ async def main(query: str) -> None:
         print("审核意见:")
         print(result.review_notes)
 
-    print("\n[OK] travel_plan_record 已落库")
+    print("\n[OK] 规划成功完成！travel_plan_record 已落库")
 
 
 def cli() -> None:
@@ -44,7 +52,7 @@ def cli() -> None:
     parser.add_argument(
         "query",
         nargs="?",
-        default="重庆3天 不想太累 喜欢美食和citywalk",
+        default="重庆2天 不想太累 喜欢美食和夜景",
         help="Natural language trip query",
     )
     args = parser.parse_args()

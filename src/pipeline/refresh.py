@@ -8,6 +8,7 @@ import logging
 from sqlalchemy import text
 
 from src.pipeline.db import get_session_factory
+from src.pipeline.summary_identity import link_summary_identities
 from src.pipeline.visit_duration import (
     aggregate_visit_duration_facts,
     fact_from_value,
@@ -334,6 +335,8 @@ async def refresh_place_summary(city: str | None = None):
                 """),
                 params,
             )
+        if await _has_column(session, "travel_place_summary", "canonical_place_id"):
+            await link_summary_identities(session, city)
         await _refresh_canonical_visit_durations(session, city)
         await session.commit()
 

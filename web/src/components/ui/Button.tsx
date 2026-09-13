@@ -1,4 +1,5 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { LoaderCircle } from "lucide-react";
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: "primary" | "secondary" | "outline" | "ghost" | "danger";
@@ -46,7 +47,7 @@ export function Button({
       {...props}
     >
       {loading ? (
-        <i className="fa-solid fa-circle-notch animate-spin text-xs" />
+        <LoaderCircle size={12} className="animate-spin" />
       ) : (
         icon
       )}

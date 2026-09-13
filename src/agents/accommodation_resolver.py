@@ -399,3 +399,86 @@ async def resolve_accommodation(
         reason=AUTO_RECOMMENDATION_REASON,
         user_input_unmatched=unmatched,
     )
+
+
+async def resolve_accommodation_context(trip_request, retrieval, session):
+    """Coupled path: failed explicit input never enters automatic recommendation."""
+    from src.agents.schema import AccommodationAnchor, AccommodationPlanningContext
+    from src.agents.accommodation_policy import urban_core, distance_km
+    from src.agents.route_feasibility import valid_coordinate
+    city = trip_request.to_city.strip()
+    statement = CANDIDATE_AREAS_SQL.replace(
+        "AND is_active = TRUE", "AND is_active = TRUE AND trust_level = 'trusted' AND review_status IN ('reviewed', 'auto_accepted')")
+    rows = await session.execute(text(statement), {"city": city})
+    areas = [_place_from_row(row) for row in rows.fetchall()]
+    areas = [a for a in areas if a.city == city and valid_coordinate(a.latitude,a.longitude)]
+    seen = set()
+    unique_areas = []
+    for area in areas:
+        coordinate = (area.latitude, area.longitude)
+        if coordinate not in seen:
+            seen.add(coordinate)
+            unique_areas.append(area)
+    areas = unique_areas
+    anchors = [AccommodationAnchor(suggestion=_suggestion_from_place(a,source="auto_recommended"),
+               place_id=a.place_id,location_precision="area") for a in areas]
+    core = urban_core(anchors)
+    request = trip_request.accommodation
+    explicit = request is not None and (bool((request.name or "").strip()) or
+        request.place_id is not None or request.latitude is not None or request.longitude is not None)
+    if not explicit:
+        old = _proximity_scoring(trip_request,retrieval,areas)
+        anchors.sort(key=lambda a:(a.place_id != (old.place_id if old else None), a.place_id or 0))
+        return AccommodationPlanningContext(state="auto_candidates" if anchors else "auto_unavailable",
+                                             anchors=anchors,urban_core=core)
+    def unresolved(code):
+        return AccommodationPlanningContext(state="user_unresolved",urban_core=core,reason_code=code)
+    has_coordinates = request.latitude is not None or request.longitude is not None
+    if has_coordinates and not valid_coordinate(request.latitude,request.longitude):
+        return unresolved("invalid_coordinates")
+    anchor = None
+    if request.place_id is not None:
+        p = await _fetch_place_by_id(session,place_id=request.place_id,city=city)
+        if p is None or p.city != city or p.place_type not in _MATCHABLE_PLACE_TYPES or not valid_coordinate(p.latitude,p.longitude):
+            return unresolved("place_id_unresolved")
+        if has_coordinates and distance_km((p.latitude,p.longitude),(request.latitude,request.longitude)) > .1:
+            return unresolved("conflicting_coordinates")
+        if (request.name or "").strip() and _name_match_key(request.name) != _name_match_key(p.canonical_name):
+            return unresolved("conflicting_name")
+        anchor = AccommodationAnchor(suggestion=_suggestion_from_place(p,source="user_specified"),
+                    place_id=p.place_id,location_precision="point" if p.place_type=="hotel" else "area")
+    elif has_coordinates:
+        anchor = AccommodationAnchor(suggestion=AccommodationSuggestion(
+            name=(request.name or "").strip() or COORDINATE_ONLY_ACCOMMODATION_NAME,
+            latitude=request.latitude,longitude=request.longitude,source="user_specified"),location_precision="point")
+    else:
+        name = request.name.strip()
+        candidates = await _fetch_name_candidates(session,city=city)
+        eligible = [p for p in candidates if p.city == city
+                    and p.place_type in _MATCHABLE_PLACE_TYPES
+                    and valid_coordinate(p.latitude, p.longitude)]
+        # Keep an explicit full name distinct from a suffix-normalized alias.
+        exact = [p for p in eligible
+                 if _compact_name(p.canonical_name) == _compact_name(name)]
+        if not exact:
+            exact = [p for p in eligible
+                     if _name_match_key(p.canonical_name) == _name_match_key(name)]
+        if len(exact)>1:
+            return unresolved("ambiguous_name")
+        if exact:
+            p=exact[0]
+            anchor = AccommodationAnchor(suggestion=_suggestion_from_place(p,source="user_specified"),
+                place_id=p.place_id,location_precision="point" if p.place_type=="hotel" else "area")
+        else:
+            geo = await _geocode_name(name,city)
+            if geo is None or not valid_coordinate(geo.latitude,geo.longitude):
+                return unresolved("name_unresolved")
+            if geo.match_count != 1 or (geo.city or geo.province or "").removesuffix("市") != city.removesuffix("市"):
+                return unresolved("ambiguous_or_wrong_city")
+            # City/district centroids are not successful hotel/address resolution.
+            if geo.level not in {"门牌号","兴趣点","道路","道路交叉口","村庄","乡镇","热点商圈"}:
+                return unresolved("insufficient_location_precision")
+            anchor = AccommodationAnchor(suggestion=AccommodationSuggestion(name=name,latitude=geo.latitude,
+                longitude=geo.longitude,source="user_specified"),
+                location_precision="point" if geo.level in {"门牌号","兴趣点"} else "area")
+    return AccommodationPlanningContext(state="fixed",anchors=[anchor],urban_core=core)

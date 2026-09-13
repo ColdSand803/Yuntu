@@ -19,6 +19,8 @@ from src.agents.schema import (
     TripRequest,
 )
 from src.api.public_guard import verify_public_api_client
+from src.jobs import city_gate as city_gate_module
+from src.jobs import trip_worker as trip_worker_module
 
 from src.jobs.trip_store import (
     RequestIdConflictError,
@@ -33,9 +35,22 @@ from src.jobs.trip_store import (
     get_trip_result_delivery_metadata,
     queue_position_for_job,
     user_message_for_job,
+    route_failure_code_for_job,
 )
 
 logger = logging.getLogger(__name__)
+
+OWNER_TEST_SOURCE = "OWNER_TEST"
+
+# The frozen v0.10.3 contract classifies OWNER_TEST as non-demand traffic. The
+# City Gate algorithm and thresholds remain unchanged; only its existing source
+# exclusion set is extended at the API composition boundary.
+city_gate_module.NON_DEMAND_SOURCES = (
+    city_gate_module.NON_DEMAND_SOURCES | {OWNER_TEST_SOURCE}
+)
+trip_worker_module.NON_DEMAND_SOURCES = (
+    trip_worker_module.NON_DEMAND_SOURCES | {OWNER_TEST_SOURCE}
+)
 
 router = APIRouter(dependencies=[Depends(verify_public_api_client)])
 
@@ -75,8 +90,8 @@ class TripAsyncCreateRequest(BaseModel):
     message: str | None = None
     trip_request: TripAsyncStructuredRequest | None = None
     request_id: str = Field(max_length=512)
-    source: str = Field(default="web", max_length=30)
-    conversation_id: str = Field(default="web-guest", max_length=200)
+    source: str = Field(default="WEB_USER", max_length=30)
+    conversation_id: str = Field(max_length=200)
     user_display_name: str | None = Field(default=None, max_length=100)
 
 
@@ -153,7 +168,7 @@ def _job_to_status_response(job: TripJobRecord) -> TripJobStatusResponse:
         message=user_message_for_job(job),
         queue_position=0 if job.status != "PENDING" else None,
         error_message=job.error_message if is_terminal and job.status != "SUCCESS" else None,
-        error_code=job.error_code if is_terminal and job.status != "SUCCESS" else None,
+        error_code=job.error_code if is_terminal and job.status != "SUCCESS" else route_failure_code_for_job(job),
         city_notice_code=trip_request_json.get("city_notice_code"),
         city_status=trip_request_json.get("city_status"),
         city_batch_status=trip_request_json.get("city_batch_status"),
@@ -306,7 +321,9 @@ async def trip_async_create(req: TripAsyncCreateRequest) -> TripAsyncCreateRespo
     message = (req.message or "").strip()
     trip_request_json: dict | None = None
     request_field_provenance: dict[str, str] = {}
-    request_user_supplied_json: dict = {}
+    request_user_supplied_json: dict = {
+        "_request_metadata": {"source": req.source},
+    }
     has_trip_request = req.trip_request is not None
     if message and has_trip_request:
         raise HTTPException(
@@ -328,7 +345,7 @@ async def trip_async_create(req: TripAsyncCreateRequest) -> TripAsyncCreateRespo
             )
         try:
             trip_request_json = TripRequest(**raw_trip_request).model_dump()
-            request_user_supplied_json = {
+            request_user_supplied_json.update({
                 field_name: (
                     trip_request_json[field_name]
                     if field_name in trip_request_json
@@ -336,7 +353,7 @@ async def trip_async_create(req: TripAsyncCreateRequest) -> TripAsyncCreateRespo
                 )
                 for field_name in request_field_provenance
                 if field_name in raw_trip_request
-            }
+            })
         except ValidationError as exc:
             raise HTTPException(
                 status_code=(

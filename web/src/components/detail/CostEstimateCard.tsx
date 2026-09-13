@@ -5,6 +5,7 @@ import {
   type CostScenarioSummary,
   type CostCategoryKey,
 } from "@/types/cost";
+import { Plane, Hotel, Bus, Ticket, Utensils, TrainFront, Info, type LucideIcon } from "lucide-react";
 
 interface CostEstimateCardProps {
   costEstimate?: CostEstimateSummary | null;
@@ -20,12 +21,12 @@ const ALL_CATEGORIES: CostCategoryKey[] = [
   "meals",
 ];
 
-const CATEGORY_META: Record<CostCategoryKey, { label: string; defaultIcon: string }> = {
-  intercity_transport: { label: "交通", defaultIcon: "fa-plane" },
-  accommodation: { label: "住宿", defaultIcon: "fa-hotel" },
-  local_transport: { label: "市内交通", defaultIcon: "fa-bus" },
-  admission: { label: "景点门票", defaultIcon: "fa-ticket" },
-  meals: { label: "餐饮", defaultIcon: "fa-utensils" },
+const CATEGORY_META: Record<CostCategoryKey, { label: string; defaultIcon: LucideIcon }> = {
+  intercity_transport: { label: "交通", defaultIcon: Plane },
+  accommodation: { label: "住宿", defaultIcon: Hotel },
+  local_transport: { label: "市内交通", defaultIcon: Bus },
+  admission: { label: "景点门票", defaultIcon: Ticket },
+  meals: { label: "餐饮", defaultIcon: Utensils },
 };
 
 function formatEstimatedAt(isoString?: string): string | null {
@@ -78,7 +79,7 @@ export function CostEstimateCard({
           预算参考
         </h2>
         <div className="flex items-center gap-2 py-4 text-sm text-gray-400">
-          <i className="fa-solid fa-circle-info text-gray-300" aria-hidden="true" />
+          <Info size={16} className="text-gray-300" aria-hidden="true" />
           <span>费用暂不可估算</span>
         </div>
       </div>
@@ -200,9 +201,9 @@ export function CostEstimateCard({
             const cat = selectedScenario.categories.find((c) => c.category === catKey);
             const meta = CATEGORY_META[catKey];
             const isTrain = selectedScenario.intercity_mode === "train";
-            const iconClass =
+            const CatIcon: LucideIcon =
               catKey === "intercity_transport"
-                ? isTrain ? "fa-train" : "fa-plane"
+                ? isTrain ? TrainFront : Plane
                 : meta.defaultIcon;
 
             const isPolicyZero = cat?.price_basis === "policy_zero";
@@ -232,8 +233,9 @@ export function CostEstimateCard({
               >
                 {/* 左侧：青色直投图标 + 分类 Label */}
                 <div className="flex items-center gap-3 shrink-0 w-28 sm:w-32">
-                  <i
-                    className={`fa-solid ${iconClass} text-teal-600 text-base w-5 text-center shrink-0`}
+                  <CatIcon
+                    size={18}
+                    className="text-teal-600 shrink-0"
                     aria-hidden="true"
                   />
                   <span className="text-sm font-medium text-gray-700">

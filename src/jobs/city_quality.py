@@ -18,7 +18,7 @@ EVIDENCE_MIN_EFFECTIVE_PLACES = 20
 EVIDENCE_MIN_EFFECTIVE_EVIDENCE = 20
 EVIDENCE_MIN_TYPE_COVERAGE = 4
 
-_FOOD_PLACE_TYPES = ("restaurant", "food", "cafe", "snack", "dessert", "market")
+_FOOD_PLACE_TYPES = ("restaurant", "food", "cafe", "snack", "snack_shop", "dessert", "market")
 
 _QUALITY_METRICS_SQL = """
 WITH canonical_scope AS (
@@ -186,6 +186,15 @@ async def calculate_city_quality(
         and int(metrics.summary_effective_evidence) >= EVIDENCE_MIN_EFFECTIVE_EVIDENCE
         and int(metrics.summary_type_coverage) >= EVIDENCE_MIN_TYPE_COVERAGE
     )
+    checks = (
+        ("canonical_activity_count_insufficient", metrics.route_eligible_activity_count, CANONICAL_MIN_ACTIVITY_COUNT),
+        ("canonical_food_count_insufficient", metrics.route_eligible_food_count, CANONICAL_MIN_FOOD_COUNT),
+        ("canonical_type_coverage_insufficient", metrics.route_eligible_type_coverage, CANONICAL_MIN_TYPE_COVERAGE),
+        ("canonical_geo_ratio_insufficient", metrics.canonical_geo_resolved_ratio, CANONICAL_MIN_GEO_RATIO),
+        ("summary_effective_places_insufficient", metrics.summary_effective_places, EVIDENCE_MIN_EFFECTIVE_PLACES),
+        ("summary_effective_evidence_insufficient", metrics.summary_effective_evidence, EVIDENCE_MIN_EFFECTIVE_EVIDENCE),
+        ("summary_type_coverage_insufficient", metrics.summary_type_coverage, EVIDENCE_MIN_TYPE_COVERAGE),
+    )
     covered_categories = tuple(
         f"type_coverage:{index + 1}"
         for index in range(int(metrics.summary_type_coverage))
@@ -198,7 +207,7 @@ async def calculate_city_quality(
         valid_evidence_count=int(metrics.summary_effective_evidence),
         covered_categories=covered_categories,
         successful_base_keywords=(),
-        blocking_issues=(),
+        blocking_issues=tuple(code for code, actual, minimum in checks if actual < minimum),
         gray_eligible=canonical_quality_pass,
         active_eligible=canonical_quality_pass and evidence_quality_pass,
         route_eligible_activity_count=int(metrics.route_eligible_activity_count),

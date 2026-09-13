@@ -10,11 +10,12 @@ from typing import Any, Iterable
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agents.llm import project_persisted_llm_usage_for_stage
 from src.pipeline.db import get_session_factory
 
 
 EVENT_TYPE = "TRIP_PROJECTION_COMMITTED"
-EVENT_SCHEMA_VERSION = "1.0"
+EVENT_SCHEMA_VERSION = "1.1"
 AGGREGATE_TYPE = "TRIP_JOB"
 MAX_CHANGED_STEPS = 500
 
@@ -59,6 +60,8 @@ STEP_PAYLOAD_FIELDS = frozenset(
         "source_updated_at",
     }
 )
+OPTIONAL_JOB_PAYLOAD_FIELDS = frozenset({"failure_observation"})
+OPTIONAL_STEP_PAYLOAD_FIELDS = frozenset({"llm_usage"})
 FORBIDDEN_PAYLOAD_KEYS = frozenset(
     {
         "email",
@@ -76,8 +79,252 @@ FORBIDDEN_PAYLOAD_KEYS = frozenset(
         "model_context",
         "metadata",
         "error_detail",
+        "relay_endpoint",
+        "endpoint_label",
+        "relay_profile",
+        "base_url",
+        "system",
+        "user",
+        "response",
+        "raw",
+        "content",
     }
 )
+
+_LLM_USAGE_FIELDS = frozenset({
+    "schema_version",
+    "observation_revision",
+    "state",
+    "total_call_count",
+    "returned_call_count",
+    "truncated",
+    "adopted_generator",
+    "calls",
+})
+_LLM_SELECTION_FIELDS = frozenset({
+    "selection_source",
+    "selection_fallback_reason",
+})
+_LLM_CALL_FIELDS = frozenset({
+    "sequence",
+    "provider",
+    "model",
+    "role",
+    "purpose",
+    "status",
+    "attempt",
+    "publish_retry_round",
+})
+_LLM_ROLES = frozenset({
+    "intent", "extract", "grouping", "selector", "writer", "review",
+})
+_LLM_PURPOSES = frozenset({
+    "INTENT_PARSE", "DATA_EXTRACTION", "SEMANTIC_GROUPING", "POI_SELECTOR",
+    "WRITER_PRIMARY", "WRITER_STANDBY", "PUBLISH_RETRY_WRITER",
+    "REVIEW", "FRAGMENT_REPAIR", "FAILURE_MESSAGE_POLISH", "OTHER_SAFE",
+})
+_LLM_STATUSES = frozenset({"SUCCESS", "FAILED", "CANCELLED", "TIMEOUT"})
+_FAILURE_FIELDS = frozenset({
+    "schema_version", "evidence_state", "observation_revision",
+    "failure_stage", "category", "reasons", "automatic_rewrite",
+})
+_REASON_FIELDS = frozenset({"code", "count", "plan_indexes"})
+_REWRITE_FIELDS = frozenset({
+    "eligible", "attempted", "completed_rounds", "not_attempted_reason",
+})
+_SAFE_REASON_CODES = frozenset({
+    "activity_content_missing", "ambiguous_alias", "blueprint_integrity_violation",
+    "blueprint_theme_weak_match", "budget_infeasible",
+    "budget_overrun_without_exception", "city_mismatch", "commute_prose_violation",
+    "cross_day_poi", "database_tone", "day_place_names_mismatch",
+    "declared_day_count_mismatch", "declared_locked_day_group_violation",
+    "duplicate_day_heading", "empty_day", "empty_plan_text",
+    "food_none_tier_violation", "food_source_attribution", "food_tier_exceeded",
+    "fragment_registry_invalidated", "generic_copy_quality_warn",
+    "invariant_commute_legs", "invariant_place_merge", "invariant_route_signature",
+    "missing_day", "missing_route_plan", "outline_only", "placeholder_wording",
+    "plan_count_mismatch", "plan_similarity_warn", "plan_text_missing_locked_stop",
+    "rare_character_compatibility", "repair_budget_exceeded",
+    "required_fact_fragment_repair_failed", "review_unavailable", "route_outside_poi",
+    "structurally_incomplete", "text_day_count_mismatch",
+    "text_locked_day_group_violation", "too_short_plan_text",
+    "transit_detail_in_prose", "transit_direction_invented",
+    "transit_line_not_allowed", "transit_stop_not_allowed", "transit_summary_altered",
+    "truncated_skeleton", "unclassified_failure", "unsupported_fact_expansion",
+    "unsupported_meal_role", "weak_evidence_data_gap",
+})
+_FAILURE_CATEGORIES = frozenset({
+    "PUBLISH_GATE_FAILED", "WRITER_CAPACITY_BUSY", "WRITER_ENDPOINTS_UNAVAILABLE",
+    "SAFE_RENDER_FAILED", "LLM_ERROR", "DB_ERROR", "WORKFLOW_ERROR", "TIMEOUT",
+    "CANCELLED",
+})
+_REWRITE_SKIP_REASONS = frozenset({
+    "NOT_APPLICABLE", "REASON_NOT_ELIGIBLE", "RETRY_ALREADY_EXHAUSTED",
+    "INSUFFICIENT_TIME_BUDGET", "SAFE_OR_LOCAL_RECOVERY_SELECTED",
+    "WRITER_FAILED_BEFORE_DRAFT", "UNKNOWN_FROM_HISTORICAL_EVIDENCE",
+})
+
+
+def _validated_llm_usage(value: Any) -> dict[str, Any]:
+    """Return a copy only when the frozen safe observation shape is exact."""
+    if not isinstance(value, dict) or set(value) not in {
+        _LLM_USAGE_FIELDS,
+        _LLM_USAGE_FIELDS | _LLM_SELECTION_FIELDS,
+    }:
+        raise ValueError("llm_usage shape is invalid")
+    if _LLM_SELECTION_FIELDS.issubset(value):
+        source = value["selection_source"]
+        reason = value["selection_fallback_reason"]
+        if source not in {"LLM", "DETERMINISTIC_FALLBACK"}:
+            raise ValueError("selection_source is invalid")
+        if reason not in {
+            None, "NOT_ATTEMPTED", "TIMEOUT", "CALL_FAILED", "INVALID_OUTPUT",
+        }:
+            raise ValueError("selection_fallback_reason is invalid")
+        if (source == "LLM") != (reason is None):
+            raise ValueError("selection source and fallback reason conflict")
+    if value.get("schema_version") != 1:
+        raise ValueError("llm_usage schema version is invalid")
+    revision = value.get("observation_revision")
+    total = value.get("total_call_count")
+    returned = value.get("returned_call_count")
+    truncated = value.get("truncated")
+    if (
+        isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 1
+        or isinstance(total, bool)
+        or not isinstance(total, int)
+        or total < 0
+        or isinstance(returned, bool)
+        or not isinstance(returned, int)
+        or not 0 <= returned <= 100
+        or not isinstance(truncated, bool)
+    ):
+        raise ValueError("llm_usage count fields are invalid")
+    state = value.get("state")
+    if state not in {"OBSERVED", "PARTIAL", "NO_LLM", "UNAVAILABLE"}:
+        raise ValueError("llm_usage state is invalid")
+    generator = value.get("adopted_generator")
+    if generator not in {"opus", "ds_flash", "safe", None}:
+        raise ValueError("llm_usage adopted generator is invalid")
+    calls = value.get("calls")
+    if not isinstance(calls, list) or len(calls) != returned:
+        raise ValueError("llm_usage returned count is inconsistent")
+    if truncated:
+        if total <= 100 or returned != 100:
+            raise ValueError("truncated llm_usage counts are inconsistent")
+    elif total != returned:
+        raise ValueError("untruncated llm_usage counts are inconsistent")
+    if state in {"OBSERVED", "PARTIAL"} and total < 1:
+        raise ValueError("observed llm_usage requires calls")
+    if state in {"NO_LLM", "UNAVAILABLE"} and (
+        total != 0 or returned != 0 or truncated or calls
+    ):
+        raise ValueError("empty llm_usage state cannot contain calls")
+    if state == "UNAVAILABLE" and generator is not None:
+        raise ValueError("unavailable llm_usage cannot name a generator")
+    copied_calls: list[dict[str, Any]] = []
+    for call in calls:
+        if not isinstance(call, dict) or set(call) != _LLM_CALL_FIELDS:
+            raise ValueError("llm call shape is invalid")
+        if (
+            isinstance(call.get("sequence"), bool)
+            or not isinstance(call.get("sequence"), int)
+            or call["sequence"] < 0
+            or isinstance(call.get("attempt"), bool)
+            or not isinstance(call.get("attempt"), int)
+            or call["attempt"] < 1
+            or isinstance(call.get("publish_retry_round"), bool)
+            or not isinstance(call.get("publish_retry_round"), int)
+            or call["publish_retry_round"] < 0
+        ):
+            raise ValueError("llm call numeric fields are invalid")
+        provider = call.get("provider")
+        model = call.get("model")
+        if (
+            not isinstance(provider, str)
+            or not 1 <= len(provider) <= 40
+            or not isinstance(model, str)
+            or not 1 <= len(model) <= 120
+            or call.get("role") not in _LLM_ROLES
+            or call.get("purpose") not in _LLM_PURPOSES
+            or call.get("status") not in _LLM_STATUSES
+        ):
+            raise ValueError("llm call safe fields are invalid")
+        copied_calls.append(dict(call))
+    return {**value, "calls": copied_calls}
+
+
+def _validated_failure_observation(value: Any) -> dict[str, Any]:
+    """Validate and copy only the frozen safe machine-failure contract."""
+    if not isinstance(value, dict) or set(value) != _FAILURE_FIELDS:
+        raise ValueError("failure_observation shape is invalid")
+    if value.get("schema_version") != 1:
+        raise ValueError("failure_observation schema version is invalid")
+    revision = value.get("observation_revision")
+    stage = value.get("failure_stage")
+    if (
+        value.get("evidence_state") not in {"AVAILABLE", "PARTIAL", "UNAVAILABLE"}
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 1
+        or not isinstance(stage, str)
+        or not 1 <= len(stage) <= 120
+        or value.get("category") not in _FAILURE_CATEGORIES
+    ):
+        raise ValueError("failure_observation header is invalid")
+    reasons = value.get("reasons")
+    if not isinstance(reasons, list) or len(reasons) > 50:
+        raise ValueError("failure_observation reasons are invalid")
+    copied_reasons = []
+    for reason in reasons:
+        if not isinstance(reason, dict) or set(reason) != _REASON_FIELDS:
+            raise ValueError("failure_observation reason shape is invalid")
+        count = reason.get("count")
+        indexes = reason.get("plan_indexes")
+        if (
+            reason.get("code") not in _SAFE_REASON_CODES
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 1
+            or not isinstance(indexes, list)
+            or len(indexes) > 20
+            or len(indexes) != len(set(indexes))
+            or any(
+                isinstance(index, bool)
+                or not isinstance(index, int)
+                or index < 1
+                for index in indexes
+            )
+        ):
+            raise ValueError("failure_observation reason value is invalid")
+        copied_reasons.append({**reason, "plan_indexes": list(indexes)})
+    rewrite = value.get("automatic_rewrite")
+    if not isinstance(rewrite, dict) or set(rewrite) != _REWRITE_FIELDS:
+        raise ValueError("automatic_rewrite shape is invalid")
+    eligible = rewrite.get("eligible")
+    attempted = rewrite.get("attempted")
+    rounds = rewrite.get("completed_rounds")
+    skip = rewrite.get("not_attempted_reason")
+    if (
+        not isinstance(eligible, bool)
+        or not isinstance(attempted, bool)
+        or isinstance(rounds, bool)
+        or not isinstance(rounds, int)
+        or not 0 <= rounds <= 1
+    ):
+        raise ValueError("automatic_rewrite values are invalid")
+    if attempted:
+        if not eligible or rounds != 1 or skip is not None:
+            raise ValueError("attempted automatic_rewrite is inconsistent")
+    elif rounds != 0 or skip not in _REWRITE_SKIP_REASONS:
+        raise ValueError("unattempted automatic_rewrite is inconsistent")
+    return {
+        **value,
+        "reasons": copied_reasons,
+        "automatic_rewrite": dict(rewrite),
+    }
 
 SAFE_ERROR_MESSAGES = {
     "PUBLISH_GATE_FAILED": "攻略未通过发布校验",
@@ -321,13 +568,21 @@ def _duration_ms(
 
 def validate_projection_event(event: dict[str, Any]) -> None:
     """Enforce application invariants and the payload privacy allowlist."""
+    if event.get("schema_version") not in {"1.0", "1.1"}:
+        raise ValueError("projection schema version is unsupported")
     payload = event.get("payload")
     if not isinstance(payload, dict) or set(payload) != {"job", "changed_steps"}:
         raise ValueError("projection payload shape is invalid")
     job = payload.get("job")
     steps = payload.get("changed_steps")
-    if not isinstance(job, dict) or set(job) != JOB_PAYLOAD_FIELDS:
+    if (
+        not isinstance(job, dict)
+        or not JOB_PAYLOAD_FIELDS.issubset(job)
+        or set(job) - JOB_PAYLOAD_FIELDS - OPTIONAL_JOB_PAYLOAD_FIELDS
+    ):
         raise ValueError("projection job payload is not allowlisted")
+    if "failure_observation" in job:
+        _validated_failure_observation(job["failure_observation"])
     if not isinstance(steps, list) or len(steps) > MAX_CHANGED_STEPS:
         raise ValueError("projection changed_steps exceeds the contract bound")
     if event.get("aggregate_id") != job.get("job_id"):
@@ -335,10 +590,16 @@ def validate_projection_event(event: dict[str, Any]) -> None:
     if event.get("aggregate_version") != job.get("source_version"):
         raise ValueError("aggregate_version must equal payload.job.source_version")
     for step in steps:
-        if not isinstance(step, dict) or set(step) != STEP_PAYLOAD_FIELDS:
+        if (
+            not isinstance(step, dict)
+            or not STEP_PAYLOAD_FIELDS.issubset(step)
+            or set(step) - STEP_PAYLOAD_FIELDS - OPTIONAL_STEP_PAYLOAD_FIELDS
+        ):
             raise ValueError("projection step payload is not allowlisted")
         if step.get("job_id") != job.get("job_id"):
             raise ValueError("projection step belongs to another job")
+        if "llm_usage" in step:
+            _validated_llm_usage(step["llm_usage"])
     safe_error = job.get("safe_error")
     if job.get("error_code") is None:
         if safe_error is not None:
@@ -373,7 +634,7 @@ def _project_job_snapshot_row(row: Any) -> dict[str, Any]:
             "code": str(error_code),
             "message": SAFE_ERROR_MESSAGES.get(str(error_code), "规划失败"),
         }
-    return {
+    projected = {
         "source_id": int(row["source_id"]),
         "job_id": str(row["job_id"]),
         "source_version": int(row["source_version"]),
@@ -405,6 +666,12 @@ def _project_job_snapshot_row(row: Any) -> dict[str, Any]:
         "trace_completeness": str(row["trace_completeness"]),
         "source_updated_at": iso_utc(row["source_updated_at"]),
     }
+    failure_observation = _json_object(row.get("failure_observation"))
+    if failure_observation and "evidence_state" in failure_observation:
+        projected["failure_observation"] = _validated_failure_observation(
+            failure_observation
+        )
+    return projected
 
 
 _JOB_SNAPSHOT_SELECT = """
@@ -433,6 +700,14 @@ _JOB_SNAPSHOT_SELECT = """
         j.finished_time,
         j.trace_completeness,
         j.updated_time AS source_updated_at,
+        (
+            SELECT observed.metadata -> 'failure_observation'
+            FROM travel_trip_job_step observed
+            WHERE observed.job_id = j.job_id
+              AND observed.metadata ? 'failure_observation'
+            ORDER BY observed.id DESC
+            LIMIT 1
+        ) AS failure_observation,
         COUNT(DISTINCT s.id) FILTER (
             WHERE s.attempt > 1 OR s.publish_retry_round > 0
         )::int AS retry_count,
@@ -484,7 +759,7 @@ async def _step_snapshots(
                 """
                 SELECT id, job_id, projection_version, stage, status, attempt,
                        publish_retry_round, started_time, finished_time,
-                       latency_ms, updated_time
+                       latency_ms, metadata, updated_time
                 FROM travel_trip_job_step
                 WHERE id = ANY(CAST(:step_ids AS bigint[]))
                 ORDER BY id ASC
@@ -504,7 +779,7 @@ async def _step_snapshots(
 
 
 def _project_step_snapshot_row(row: Any) -> dict[str, Any]:
-    return {
+    projected = {
         "source_step_id": int(row["id"]),
         "job_id": str(row["job_id"]),
         "source_version": int(row["projection_version"]),
@@ -521,6 +796,40 @@ def _project_step_snapshot_row(row: Any) -> dict[str, Any]:
         ),
         "source_updated_at": iso_utc(row["updated_time"]),
     }
+    metadata = _json_object(row.get("metadata"))
+    direct_usage = metadata.get("llm_usage")
+    if direct_usage is not None:
+        usage = _validated_llm_usage(direct_usage)
+    elif str(row["status"]) != "RUNNING":
+        usage = _validated_llm_usage(
+            project_persisted_llm_usage_for_stage(
+                metadata.get("llm_observation"),
+                stage=str(row["stage"]),
+                attempt=int(row["attempt"]),
+                publish_retry_round=int(row["publish_retry_round"]),
+                adopted_generator=(
+                    str(metadata.get("adopted_generator"))
+                    if metadata.get("adopted_generator") in {
+                        "opus", "ds_flash", "safe"
+                    }
+                    else None
+                ),
+            )
+        )
+    else:
+        usage = None
+    if usage is not None:
+        if str(row["stage"]) == "POI_SELECTION":
+            source = metadata.get("selection_source")
+            reason = metadata.get("selection_fallback_reason")
+            if source is not None:
+                usage = _validated_llm_usage({
+                    **usage,
+                    "selection_source": source,
+                    "selection_fallback_reason": reason,
+                })
+        projected["llm_usage"] = usage
+    return projected
 
 
 async def get_trip_job_snapshot_page(
@@ -598,7 +907,7 @@ async def get_trip_step_snapshot_page(
                     """
                     SELECT id, job_id, projection_version, stage, status,
                            attempt, publish_retry_round, started_time,
-                           finished_time, latency_ms, updated_time
+                           finished_time, latency_ms, metadata, updated_time
                     FROM travel_trip_job_step
                     WHERE id > :after_id
                       AND id <= :snapshot_max_id

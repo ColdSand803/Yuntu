@@ -31,10 +31,10 @@ STAGE_USER_MESSAGES: dict[str, str] = {
     "INTENT_PARSER": "正在理解你的旅行需求",
     "DATA_RETRIEVAL": "正在检索地点数据",
     "SEMANTIC_GROUPING": "正在整理候选方案",
+    "POI_SELECTION": "正在筛选攻略地点",
     "ROUTE_PLANNING": "正在优化每日路线",
     "FINAL_WRITER": "正在生成攻略",
     "HERMES_REVIEW": "正在审核攻略内容",
-    "QUALITY_REVIEW": "正在审核攻略内容",
     "REVIEW_TAXONOMY": "正在归类攻略质量问题",
     "WRITER_REPAIR": "正在修复可修复的攻略问题",
     "REVIEW_TAXONOMY_AFTER_REPAIR": "正在复核修复后的攻略",
@@ -50,23 +50,8 @@ NO_USABLE_ROUTE_USER_MESSAGE = "现有地点无法组成合规路线，请调整
 REJECTED_USER_MESSAGES = {
     "CITY_CLARIFICATION_REQUIRED": (
         "我还差一个关键信息：你想去哪个城市？"
-        "可以直接发“成都3天美食”或“重庆3天打卡”，"
+        "可以直接发“成都3天美食”或“福州3天想去平潭”，"
         "我再继续帮你规划。"
-    ),
-    "CITY_PREPARING": (
-        "这座城市的数据正在准备中，预计很快支持。"
-        "你可以稍后再试，或先体验重庆等已开通城市。"
-    ),
-    "CITY_DATA_INSUFFICIENT": (
-        "这座城市的数据还在完善中，暂时无法生成高品质攻略。"
-        "你可以稍后再试，或先试试其他热门城市。"
-    ),
-    "CITY_COLLECTION_FAILED": (
-        "这座城市的数据暂不可用，我们正在跟进。"
-        "你可以稍后再试，或先体验其他已开通城市。"
-    ),
-    "CITY_DISABLED": (
-        "这座城市暂时不在服务范围内，我们会持续扩大覆盖。"
     ),
 }
 
@@ -214,17 +199,28 @@ def _coerce_place_ids(raw_place_ids) -> set[int]:
     return place_ids
 
 
+def route_failure_code_for_job(job: TripJobRecord) -> str | None:
+    from src.agents.route_notices import COUPLED_ROUTE_FAILURE_NOTICES
+    if job.status != "SUCCESS" or job.result_type != "NO_USABLE_ROUTE":
+        return None
+    code = (job.trip_request_json or {}).get("route_failure_code")
+    return code if isinstance(code, str) and code in COUPLED_ROUTE_FAILURE_NOTICES else None
+
+
 def user_message_for_job(job: TripJobRecord) -> str:
     if job.status == "REJECTED":
         return (
             job.error_message
             or REJECTED_USER_MESSAGES.get(job.error_code or "")
-            or "该城市暂不支持规划，请稍后再试"
+            or job.error_code
+            or "CITY_GATE_REJECTED"
         )
     if job.status == "SUCCESS" and job.result_type == "NO_CANDIDATES":
         return NO_CANDIDATES_USER_MESSAGE
     if job.status == "SUCCESS" and job.result_type == "NO_USABLE_ROUTE":
-        return NO_USABLE_ROUTE_USER_MESSAGE
+        from src.agents.route_notices import COUPLED_ROUTE_FAILURE_NOTICES
+        code = route_failure_code_for_job(job)
+        return COUPLED_ROUTE_FAILURE_NOTICES[code] if code else NO_USABLE_ROUTE_USER_MESSAGE
     if job.status == "FAILED" and job.error_message:
         return job.error_message
     if job.status in STAGE_USER_MESSAGES:
@@ -785,6 +781,61 @@ async def record_trip_job_step_event(
         await session.commit()
 
 
+async def enrich_latest_trip_job_step_observation(
+    job_id: str,
+    *,
+    stage: str,
+    attempt: int,
+    publish_retry_round: int,
+    metadata: dict,
+) -> bool:
+    """Append observation-only metadata to the owning terminal step."""
+    factory = get_session_factory()
+    async with factory() as session:
+        row = (
+            await session.execute(
+                text(
+                    """
+                    WITH target AS (
+                        SELECT id
+                        FROM travel_trip_job_step
+                        WHERE job_id = :job_id
+                          AND stage = :stage
+                          AND attempt = :attempt
+                          AND publish_retry_round = :publish_retry_round
+                        ORDER BY started_time DESC, id DESC
+                        LIMIT 1
+                        FOR UPDATE
+                    )
+                    UPDATE travel_trip_job_step step
+                    SET metadata = step.metadata || CAST(:metadata AS jsonb),
+                        projection_version = step.projection_version + 1
+                    FROM target
+                    WHERE step.id = target.id
+                    RETURNING step.id
+                    """
+                ),
+                {
+                    "job_id": job_id,
+                    "stage": stage,
+                    "attempt": attempt,
+                    "publish_retry_round": publish_retry_round,
+                    "metadata": json.dumps(metadata, ensure_ascii=False),
+                },
+            )
+        ).one_or_none()
+        if row is None:
+            await session.rollback()
+            return False
+        await emit_trip_projection_commit(
+            session,
+            job_id=job_id,
+            changed_step_ids=[int(row.id)],
+        )
+        await session.commit()
+        return True
+
+
 async def close_running_trip_job_steps(
     job_id: str,
     *,
@@ -1005,6 +1056,7 @@ async def mark_trip_job_rejected_with_message(
     error_code: str,
     error_message: str | None = None,
     step_metadata: dict | None = None,
+    ensure_terminal_evidence: bool = False,
 ) -> None:
     factory = get_session_factory()
     async with factory() as session:
@@ -1032,6 +1084,20 @@ async def mark_trip_job_rejected_with_message(
                 status="FAILED",
                 metadata=step_metadata,
             )
+            if ensure_terminal_evidence and not step_ids and step_metadata:
+                terminal_meta = dict(step_metadata)
+                terminal_meta.setdefault("event_type", "TERMINAL_EVIDENCE")
+                step_ids.append(
+                    await insert_trip_step(
+                        session,
+                        job_id=job_id,
+                        stage="LLM_OBSERVABILITY",
+                        status="FAILED",
+                        latency_ms=0,
+                        metadata=terminal_meta,
+                        finished=True,
+                    )
+                )
             await emit_trip_projection_commit(
                 session,
                 job_id=job_id,
