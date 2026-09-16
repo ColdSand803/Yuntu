@@ -11,12 +11,12 @@ export function useDestinations() {
     queryKey: ['destinations'],
     queryFn: async () => {
       const result = await fetchDestinations();
-      try { sessionStorage.setItem('yuntu:destinations:v1', JSON.stringify(result)); } catch { /* Storage may be disabled. */ }
+      try { sessionStorage.setItem('yuntu:destinations:v2', JSON.stringify(result)); } catch { /* Storage may be disabled. */ }
       return result;
     },
     placeholderData: () => {
       try {
-        const cached = JSON.parse(sessionStorage.getItem('yuntu:destinations:v1') || 'null') as DestinationsResponse | null;
+        const cached = JSON.parse(sessionStorage.getItem('yuntu:destinations:v2') || 'null') as DestinationsResponse | null;
         if (cached && Array.isArray(cached.destinations) && cached.destinations.every(d => typeof d?.id === 'string' && typeof d?.name === 'string')) return cached;
       } catch { /* Invalid or unavailable storage is ignored; HTTP still runs. */ }
       return undefined;

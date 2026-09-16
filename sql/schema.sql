@@ -587,6 +587,7 @@ CREATE TABLE travel_place_summary (
     avg_price           NUMERIC(8,2),
     opening_hours       VARCHAR(200),
     top_reasons         JSONB       NOT NULL DEFAULT '[]'::JSONB,
+    cleaned_evidence    JSONB,
     warnings            JSONB       NOT NULL DEFAULT '[]'::JSONB,
     hot_score           NUMERIC(10,2) NOT NULL DEFAULT 0,
     quality_score       NUMERIC(3,1) NOT NULL DEFAULT 0
@@ -614,6 +615,7 @@ CREATE TRIGGER trg_summary_updated
 
 COMMENT ON TABLE travel_place_summary IS '地点聚合摘要表，由定时任务刷新，yuntu-travel 快速查询入口';
 COMMENT ON COLUMN travel_place_summary.canonical_place_id IS 'v0.6.15 attachment from summary evidence to trusted canonical POI';
+COMMENT ON COLUMN travel_place_summary.cleaned_evidence IS 'Optional offline-cleaned reason payload; retrieval falls back to top_reasons when null or empty';
 
 
 -- -----------------------------------------------------------
@@ -642,6 +644,12 @@ CREATE TABLE travel_plan_record (
     model_name      VARCHAR(50),
     quality_feedback TEXT,
     quality_metrics JSONB,
+    accommodation_name VARCHAR(200),
+    accommodation_lat DOUBLE PRECISION
+        CHECK (accommodation_lat IS NULL OR (accommodation_lat >= -90 AND accommodation_lat <= 90)),
+    accommodation_lng DOUBLE PRECISION
+        CHECK (accommodation_lng IS NULL OR (accommodation_lng >= -180 AND accommodation_lng <= 180)),
+    accommodation_source VARCHAR(50),
     created_time    TIMESTAMPTZ     NOT NULL DEFAULT NOW()
 );
 

@@ -363,6 +363,45 @@ class AmapClient:
             )
         return pois
 
+    async def search_place_text(
+        self,
+        *,
+        city: str,
+        keywords: str = "",
+        types: str = "",
+        page: int = 1,
+        offset: int = 25,
+        extensions: str = "all",
+        citylimit: bool = True,
+    ) -> dict:
+        """Paginated city-limited place/text search for canonical import."""
+        if not (keywords or types):
+            raise ValueError("Amap place search requires keywords or types")
+        params: dict[str, object] = {
+            "city": city,
+            "offset": max(1, min(int(offset), 25)),
+            "page": max(1, int(page)),
+            "extensions": extensions or "base",
+        }
+        if keywords:
+            params["keywords"] = keywords
+        if types:
+            params["types"] = types
+        if citylimit:
+            params["citylimit"] = "true"
+        env_name = (
+            "AMAP_API_KEY_TWO"
+            if self.search_api_key and self.search_api_key != self.api_key
+            else "AMAP_API_KEY"
+        )
+        return await self._get_json(
+            "/v3/place/text",
+            params=params,
+            timeout=self.poi_search_timeout,
+            api_key=self.search_api_key,
+            env_name=env_name,
+        )
+
     async def fetch_districts(
         self,
         *,

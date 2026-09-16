@@ -101,7 +101,7 @@
   > **为什么首页目前只显示重庆？**
   > 本开源仓库的核心是展示**生产级 AI 旅行规划引擎的架构与全链路实现**（确定性排程 + 空间算法 + 真实 POI 事实约束）。为降低本地自建与部署门槛，本仓库种子数据库当前**仅内置了【重庆】全套 27+ 核心经过验证的地点与经纬度数据**。
   > 
-  > 为避免用户因缺少其他城市 POI 数据库而导致规划失败，**首页（山河地图与经典胶囊模式）默认聚焦并仅展示重庆**。如需扩展其他城市（如成都、西安、北京、上海等），只需向本地数据库 `travel_canonical_place` 导入对应城市的真实地点，并在 `src/api/destinations.py` 中启用对应城市即可。如需体验 16+ 热门名城完整在线服务，可访问官方线上体验站 [kakarot8.com](https://kakarot8.com)。
+  > 为避免用户因缺少其他城市 POI 数据库而导致规划失败，**首页（山河地图与经典胶囊模式）默认聚焦并仅展示重庆**。如需扩展其他城市（如成都、西安、北京、上海等），运行 `python -m scripts.seed_city_from_amap --city 成都 --activate` 导入 POI 并激活即可；首页目录会从数据库自动读取，不必再改 `src/api/destinations.py`。如需体验 16+ 热门名城完整在线服务，可访问官方线上体验站 [kakarot8.com](https://kakarot8.com)。
 - **安全提醒**：`docker-compose.yml` 里的 `yuntu` / `yuntupassword` 是本地演示口令，生产环境请务必修改。
 
 ---
@@ -132,6 +132,40 @@ cp .env.example .env.development   # 按需补 VITE_AMAP_KEY
 npm install
 npm run dev                        # http://localhost:3000
 ```
+
+### 自动灌入其他城市 POI
+
+开源种子只含重庆。其他城市用高德 **Web 服务 Key**（不是前端 JS Key）写入 `travel_canonical_place`。首页目录会读数据库里 `GRAY` / `ACTIVE` 的城市，**不必再改** `src/api/destinations.py`。
+
+`.env` 需要：
+
+```env
+AMAP_API_KEY=你的高德Web服务Key
+# 可选第二把搜索 Key；不填则回退 AMAP_API_KEY
+AMAP_API_KEY_TWO=
+```
+
+用法：
+
+```bash
+# 只预览，不写库（先确认 Key 和名单）
+python -m scripts.seed_city_from_amap --city 成都 --dry-run
+
+# 写入并激活，首页即可选择该城
+python -m scripts.seed_city_from_amap --city 成都 --activate
+
+# 多城（建议 5～10 个一批，注意高德日配额）
+python -m scripts.seed_city_from_amap --city 杭州,西安,厦门 --activate
+```
+
+常用参数：`--pages` 每类搜索页数（默认 4）、`--max-attractions` / `--max-food` / `--max-areas` 截断条数、`--min-food-rating` 餐饮评分门槛（默认 4.3）。
+
+说明：
+
+- 灌的是地点名、坐标、类型、评分，**不含景点相册**。相册走线上 CDN，开源本地没有。
+- 脚本按 `amap_poi_id` 和「城市+名称」upsert，重复执行会更新而不是插重复行。
+- `--activate` 把 `travel_city.status` 设为 `ACTIVE`。刷新前端；若首页仍只有重庆，清一下浏览器 `sessionStorage` 里的 `yuntu:destinations:v2`。
+- 单次请求较多，Windows 连 Docker Postgres 可能中途断线；脚本会分批提交并自动重连，失败后重跑同一命令即可。
 
 仓库里有 `docker-compose.yml`，可作参考，但**没有保证一键就能跑通全栈**。自己部署时注意：默认 API 只放行本机 IP，容器网络下前端反代可能会 403；公网暴露前请自己收紧端口和鉴权。
 
@@ -201,6 +235,7 @@ Yuntu/
 │   └── seed_chongqing.sql   # 重庆精选真实 POI 与商圈种子数据
 ├── scripts/
 │   ├── init_db.py           # 一键初始化数据库与种子
+│   ├── seed_city_from_amap.py  # 从高德自动灌入其他城市 POI
 │   ├── trip.py              # 命令行单次端到端规划体验
 │   └── stress_test.py       # 规划引擎回归与压测
 ├── docs/                    # 架构文档与 README 截图

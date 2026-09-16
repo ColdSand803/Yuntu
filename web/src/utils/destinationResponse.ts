@@ -37,6 +37,7 @@ export function parseDestinationsResponse(raw: unknown): DestinationsResponse {
       coordinates: valid ? { latitude: coords!.lat as number, longitude: coords!.lng as number } : undefined,
       mapLabelOffset: { x: typeof offset?.x === 'number' && Number.isFinite(offset.x) ? offset.x : 0,
         y: typeof offset?.y === 'number' && Number.isFinite(offset.y) ? offset.y : 0 },
+      isActive: d.isActive !== false && d.is_active !== false,
     };
   });
   return { destinations, total: destinations.length, timestamp: 'cached_at' in raw && typeof raw.cached_at === 'string' ? raw.cached_at : '' };
