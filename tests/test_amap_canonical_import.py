@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.pipeline.amap_place_search import PlaceSearchHit, SearchGroup, parse_place_hit
+from src.pipeline.amap_place_search import PlaceSearchHit, SearchGroup, default_search_groups, parse_place_hit
 from src.pipeline.amap_type_map import (
     is_junk_name,
     map_amap_poi,
@@ -240,3 +240,16 @@ class DisconnectTests(unittest.TestCase):
             )
         )
         self.assertFalse(is_disconnect_error(ValueError("invalid city")))
+
+
+class SearchGroupTests(unittest.TestCase):
+    def test_includes_suburban_scenic_queries(self) -> None:
+        groups = default_search_groups()
+        names = [group.name for group in groups]
+        self.assertIn("heritage", names)
+        self.assertIn("scenic_area", names)
+        self.assertIn("named_park", names)
+        scenic_area = next(group for group in groups if group.name == "scenic_area")
+        self.assertEqual(scenic_area.keywords, "风景区")
+        park = next(group for group in groups if group.name == "park")
+        self.assertGreaterEqual(park.max_keep, 12)

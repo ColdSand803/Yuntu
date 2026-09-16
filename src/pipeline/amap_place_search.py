@@ -56,10 +56,28 @@ def default_search_groups(
     min_food_rating: float = 4.3,
 ) -> tuple[SearchGroup, ...]:
     area_keep = max(1, max_areas // 2)
+    park_keep = max(12, max_attractions // 3)
     return (
+        SearchGroup(
+            name="heritage",
+            types="110201|110202|110203|110210|110208",
+            max_keep=max(20, max_attractions // 2),
+        ),
         SearchGroup(name="scenic", types="110000", max_keep=max_attractions),
+        SearchGroup(
+            name="scenic_area",
+            types="110000",
+            keywords="风景区",
+            max_keep=20,
+        ),
         SearchGroup(name="museum", types="140100|140400|140200|140600", max_keep=8),
-        SearchGroup(name="park", types="110100", max_keep=8),
+        SearchGroup(name="park", types="110100", max_keep=park_keep),
+        SearchGroup(
+            name="named_park",
+            types="110100",
+            keywords="公园",
+            max_keep=park_keep,
+        ),
         SearchGroup(
             name="food",
             types="050000",
