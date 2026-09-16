@@ -665,6 +665,57 @@ async def fetch_place_resolution_targets(
     ]
 
 
+async def fetch_place_resolution_targets_for_runs(
+    crawl_run_ids: list[int],
+    *,
+    limit: int,
+    force: bool = False,
+) -> list[PlaceResolutionTarget]:
+    if not crawl_run_ids:
+        return []
+    factory = get_session_factory()
+    where_status = ""
+    if not force:
+        where_status = """
+          AND (
+            p.poi_resolution_status IS NULL
+            OR (
+              p.poi_resolution_status = 'pending'
+              AND COALESCE(p.poi_resolution_attempts, 0) < :max_attempts
+            )
+          )
+        """
+    async with factory() as session:
+        rows = (await session.execute(text(f"""
+            SELECT DISTINCT p.id, p.city, p.name,
+                   COALESCE(p.poi_resolution_attempts, 0) AS attempts
+            FROM travel_place AS p
+            JOIN travel_content_place_mention AS mention
+              ON mention.place_id = p.id
+            JOIN travel_content AS content
+              ON content.id = mention.content_id
+            JOIN travel_raw_item AS raw
+              ON raw.id = content.raw_item_id
+            WHERE raw.crawl_run_id = ANY(CAST(:crawl_run_ids AS bigint[]))
+              {where_status}
+            ORDER BY p.updated_time ASC, p.id ASC
+            LIMIT :limit
+        """), {
+            "crawl_run_ids": crawl_run_ids,
+            "limit": limit,
+            "max_attempts": MAX_POI_RESOLUTION_ATTEMPTS,
+        })).all()
+    return [
+        PlaceResolutionTarget(
+            place_id=int(row.id),
+            city=row.city,
+            name=row.name,
+            attempts=int(row.attempts or 0),
+        )
+        for row in rows
+    ]
+
+
 async def fetch_summary_backfill_targets(
     *,
     city: str,

@@ -167,6 +167,39 @@ python -m scripts.seed_city_from_amap --city 杭州,西安,厦门 --activate
 - `--activate` 把 `travel_city.status` 设为 `ACTIVE`。刷新前端；若首页仍只有重庆，清一下浏览器 `sessionStorage` 里的 `yuntu:destinations:v2`。
 - 单次请求较多，Windows 连 Docker Postgres 可能中途断线；脚本会分批提交并自动重连，失败后重跑同一命令即可。
 
+### 采集小红书笔记（可选）
+
+景点主数据仍用高德灌库。小红书只补**推荐理由 / 避坑证据**，让攻略文案更像笔记而不是地名清单。开源不直接登录小红书，而是走 [TikHub](https://api.tikhub.io) 的笔记搜索/详情接口。
+
+`.env` 另需：
+
+```env
+TIKHUB_API_TOKEN=你的TikHub Token
+TIKHUB_BASE_URL=https://api.tikhub.io
+EXTRACT_PROVIDER=relay          # 或 deepseek / gemini，用于从笔记抽地点
+EXTRACT_MODEL=你的抽取模型
+# 若 EXTRACT_PROVIDER=relay，复用下面网关
+# EXTRACT_RELAY_PROFILE=claude_newapi
+```
+
+一条龙（默认用城市基础关键词，每词最多 10 条图文笔记）：
+
+```bash
+python -m scripts.xhs_collect --city 成都 --limit 10 --max-keywords 3
+```
+
+或按 worker 同款分步：
+
+```bash
+python -m scripts.crawl --city 成都 --keyword 成都旅游 --limit 10
+python -m scripts.extract --limit 50
+python -m scripts.poi_resolve_for_run --city 成都 --limit 500
+python -m scripts.refresh_summary --city 成都
+python -m scripts.canonical_onboard --city 成都
+```
+
+只采集图文笔记（不含视频）。抽地点需要可用的 `EXTRACT_*` 大模型配置；坐标解析仍走 `AMAP_API_KEY`。
+
 仓库里有 `docker-compose.yml`，可作参考，但**没有保证一键就能跑通全栈**。自己部署时注意：默认 API 只放行本机 IP，容器网络下前端反代可能会 403；公网暴露前请自己收紧端口和鉴权。
 
 ---
@@ -236,6 +269,8 @@ Yuntu/
 ├── scripts/
 │   ├── init_db.py           # 一键初始化数据库与种子
 │   ├── seed_city_from_amap.py  # 从高德自动灌入其他城市 POI
+│   ├── xhs_collect.py       # 小红书采集一条龙（TikHub）
+│   ├── crawl.py / extract.py / poi_resolve_for_run.py / refresh_summary.py / canonical_onboard.py
 │   ├── trip.py              # 命令行单次端到端规划体验
 │   └── stress_test.py       # 规划引擎回归与压测
 ├── docs/                    # 架构文档与 README 截图

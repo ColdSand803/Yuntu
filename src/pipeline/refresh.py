@@ -8,7 +8,12 @@ import logging
 from sqlalchemy import text
 
 from src.pipeline.db import get_session_factory
-from src.pipeline.summary_identity import link_summary_identities
+try:
+    from src.pipeline.summary_identity import link_summary_identities
+except ImportError:  # pragma: no cover - optional identity linker
+    async def link_summary_identities(session, city=None):
+        return 0
+
 from src.pipeline.visit_duration import (
     aggregate_visit_duration_facts,
     fact_from_value,
