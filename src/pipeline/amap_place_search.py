@@ -57,6 +57,7 @@ def default_search_groups(
 ) -> tuple[SearchGroup, ...]:
     area_keep = max(1, max_areas // 2)
     park_keep = max(12, max_attractions // 3)
+    food_specialty_keep = max(6, max_food // 2)
     return (
         SearchGroup(
             name="heritage",
@@ -70,6 +71,18 @@ def default_search_groups(
             keywords="风景区",
             max_keep=20,
         ),
+        SearchGroup(
+            name="cultural_blocks",
+            types="110200|110000",
+            keywords="街区|古镇|胡同|艺术区|798",
+            max_keep=12,
+        ),
+        SearchGroup(
+            name="landmarks_resort",
+            types="080501|080101|110000",
+            keywords="度假区|体育场|游乐园|水立方",
+            max_keep=10,
+        ),
         SearchGroup(name="museum", types="140100|140400|140200|140600", max_keep=8),
         SearchGroup(name="park", types="110100", max_keep=park_keep),
         SearchGroup(
@@ -79,12 +92,18 @@ def default_search_groups(
             max_keep=park_keep,
         ),
         SearchGroup(
+            name="specialty_food",
+            types="050000",
+            keywords="老字号|特色菜",
+            max_keep=food_specialty_keep,
+        ),
+        SearchGroup(
             name="food",
             types="050000",
-            max_keep=max_food,
+            max_keep=max_food - food_specialty_keep,
             min_rating=min_food_rating,
         ),
-        SearchGroup(name="market", types="060400", max_keep=6),
+        SearchGroup(name="market", types="060400|060401|060700|060702", keywords="市场|旧货", max_keep=6),
         SearchGroup(
             name="areas",
             types="060000",
@@ -94,7 +113,7 @@ def default_search_groups(
         ),
         SearchGroup(
             name="streets",
-            keywords="步行街",
+            keywords="步行街|商业街",
             max_keep=max(1, max_areas - area_keep),
             force_type="accommodation_area",
         ),
@@ -190,45 +209,49 @@ async def search_group_pages(
 ) -> list[PlaceSearchHit]:
     hits: list[PlaceSearchHit] = []
     seen: set[str] = set()
-    for page in range(1, max(1, max_pages) + 1):
-        payload = await _call_with_retry(
-            lambda page=page: client.search_place_text(
-                city=city,
-                keywords=group.keywords,
-                types=group.types,
-                page=page,
-                offset=page_size,
-                extensions="all",
-                citylimit=True,
+    keywords = [k.strip() for k in group.keywords.split("|") if k.strip()] if group.keywords else [""]
+    pages_per_kw = max(1, max_pages // len(keywords)) if len(keywords) > 1 else max_pages
+    for kw in keywords:
+        for page in range(1, pages_per_kw + 1):
+            payload = await _call_with_retry(
+                lambda page=page, kw=kw: client.search_place_text(
+                    city=city,
+                    keywords=kw,
+                    types=group.types,
+                    page=page,
+                    offset=page_size,
+                    extensions="all",
+                    citylimit=True,
+                )
             )
-        )
-        pois = payload.get("pois") or []
-        page_hits = 0
-        for item in pois:
-            if not isinstance(item, dict):
-                continue
-            hit = parse_place_hit(item)
-            if hit is None or hit.poi_id in seen:
-                continue
-            seen.add(hit.poi_id)
-            hits.append(hit)
-            page_hits += 1
-        count = 0
-        try:
-            count = int(payload.get("count") or 0)
-        except (TypeError, ValueError):
+            pois = payload.get("pois") or []
+            page_hits = 0
+            for item in pois:
+                if not isinstance(item, dict):
+                    continue
+                hit = parse_place_hit(item)
+                if hit is None or hit.poi_id in seen:
+                    continue
+                seen.add(hit.poi_id)
+                hits.append(hit)
+                page_hits += 1
             count = 0
-        logger.info(
-            "amap search city=%s group=%s page=%s got=%s total=%s count=%s",
-            city,
-            group.name,
-            page,
-            page_hits,
-            len(hits),
-            count,
-        )
-        if page_hits == 0:
-            break
-        if count and page * page_size >= count:
-            break
+            try:
+                count = int(payload.get("count") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            logger.info(
+                "amap search city=%s group=%s kw=%s page=%s got=%s total=%s count=%s",
+                city,
+                group.name,
+                kw,
+                page,
+                page_hits,
+                len(hits),
+                count,
+            )
+            if page_hits == 0:
+                break
+            if count and page * page_size >= count:
+                break
     return hits

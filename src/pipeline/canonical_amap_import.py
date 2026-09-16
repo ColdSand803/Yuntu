@@ -110,10 +110,10 @@ def prepare_hits(
         "skipped_dup": 0,
     }
     prepared: list[PreparedPlace] = []
-    ranked: list[tuple[int, PreparedPlace]] = []
+    ranked: list[tuple[int, float, int, PreparedPlace]] = []
     local_ids: set[str] = set()
     local_names: set[str] = set()
-    for hit in hits:
+    for index, hit in enumerate(hits):
         counters["scanned"] += 1
         if hit.poi_id in seen_ids or hit.poi_id in local_ids:
             counters["skipped_dup"] += 1
@@ -156,9 +156,10 @@ def prepare_hits(
             open_time=hit.open_time,
             group_name=group.name,
         )
-        ranked.append((mapped.base_priority, place))
-    ranked.sort(key=lambda item: (-item[0], item[1].canonical_name))
-    for _, place in ranked:
+        ranked.append((mapped.base_priority, hit.rating or 0.0, index, place))
+    ranked.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    for item in ranked:
+        place = item[3]
         if len(prepared) >= group.max_keep:
             break
         seen_ids.add(place.poi_id)

@@ -17,7 +17,7 @@ DEFAULT_VISIT_MINUTES = {
     "business_area": 60,
 }
 
-MAJOR_NAME_MARKERS = ("景区", "风景区", "古镇", "老街", "世界遗产", "国家公园")
+MAJOR_NAME_MARKERS = ("景区", "风景区", "古镇", "老街", "世界遗产", "国家公园", "度假区", "度假村", "艺术区")
 
 _JUNK_NAME = re.compile(
     r"(停车场|停车楼|停车位|停车点|P\d+|卫生间|公厕|厕所|出入口|售票处|检票|"
@@ -28,6 +28,10 @@ _GATE_NAME = re.compile(r"(东门|西门|南门|北门|正门|后门|侧门|入�
 
 # Longest prefix first. Unlisted prefixes are rejected.
 _TYPE_RULES: tuple[tuple[str, str, int], ...] = (
+    ("080501", "attraction", 96),
+    ("080101", "photo_spot", 88),
+    ("060702", "market", 75),
+    ("060700", "market", 72),
     ("110201", "attraction", 100),
     ("110202", "attraction", 98),
     ("110210", "attraction", 92),
@@ -148,7 +152,7 @@ def _name_type_override(name: str, place_type: str) -> str:
         return "museum"
     if place_type == "attraction" and any(token in name for token in ("公园", "植物园", "动物园")):
         return "park"
-    if place_type == "attraction" and any(token in name for token in ("观景", "打卡", "玻璃栈道")):
+    if place_type == "attraction" and any(token in name for token in ("观景", "打卡", "玻璃栈道", "体育场", "体育馆", "游泳中心")):
         return "photo_spot"
     return place_type
 

@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     app_version: str = "0.9.9.10"
     database_url: str = "postgresql+asyncpg://user:pass@localhost:5432/yuntu_travel"
     gemini_api_key: str = ""
+    gemini_base_url: str = ""
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = ""
+    openai_api_key: str = ""
+    openai_base_url: str = ""
     tikhub_api_token: str = ""
     tikhub_base_url: str = "https://api.tikhub.io"
     tikhub_rps: float = 5.0

@@ -402,6 +402,7 @@ _PROVIDER_BASE_URLS: dict[str, str] = {
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
     "deepseek": "https://api.deepseek.com",
     "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",  # placeholder, overridden by config
+    "openai": "https://api.openai.com/v1",
 }
 _RELAY_PROFILES = frozenset({
     "gpt",
@@ -1084,13 +1085,25 @@ def resolve_role_config(role: str) -> RoleConfig:
                 ),
             )
     else:
-        base_url = _PROVIDER_BASE_URLS[provider]
+        if provider == "gemini" and s.gemini_base_url.strip():
+            base_url = s.gemini_base_url.strip()
+        elif provider == "deepseek" and s.deepseek_base_url.strip():
+            base_url = s.deepseek_base_url.strip()
+        elif provider == "openai" and s.openai_base_url.strip():
+            base_url = s.openai_base_url.strip()
+        else:
+            base_url = _PROVIDER_BASE_URLS[provider]
         wire_api = "openai_chat"
         api_key: str = getattr(s, f"{role}_api_key", "")
-        if not api_key and provider == "gemini":
-            api_key = s.gemini_api_key
+        if not api_key:
+            if provider == "gemini":
+                api_key = s.gemini_api_key
+            elif provider == "deepseek":
+                api_key = s.deepseek_api_key
+            elif provider == "openai":
+                api_key = s.openai_api_key
     if not api_key:
-        fallback_hint = " or GEMINI_API_KEY" if provider == "gemini" else ""
+        fallback_hint = f" or {provider.upper()}_API_KEY" if provider in {"gemini", "deepseek", "openai"} else ""
         raise ValueError(
             f"No API key for role {role!r}. "
             f"Set {role.upper()}_API_KEY{fallback_hint} in .env "
@@ -1115,7 +1128,16 @@ def _get_client(
 ) -> AsyncOpenAI:
     # provider is already validated by resolve_role_config
     verify_ssl = get_settings().llm_verify_ssl
-    resolved_base_url = base_url or _PROVIDER_BASE_URLS.get(provider, "")
+    s = get_settings()
+    custom_base_url = ""
+    if provider == "gemini" and s.gemini_base_url.strip():
+        custom_base_url = s.gemini_base_url.strip()
+    elif provider == "deepseek" and s.deepseek_base_url.strip():
+        custom_base_url = s.deepseek_base_url.strip()
+    elif provider == "openai" and s.openai_base_url.strip():
+        custom_base_url = s.openai_base_url.strip()
+
+    resolved_base_url = base_url or custom_base_url or _PROVIDER_BASE_URLS.get(provider, "")
     if not resolved_base_url:
         raise ValueError(f"No base URL configured for provider {provider!r}")
     key = (provider, resolved_base_url, api_key, verify_ssl)

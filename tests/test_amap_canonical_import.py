@@ -249,7 +249,24 @@ class SearchGroupTests(unittest.TestCase):
         self.assertIn("heritage", names)
         self.assertIn("scenic_area", names)
         self.assertIn("named_park", names)
+        self.assertIn("cultural_blocks", names)
+        self.assertIn("landmarks_resort", names)
+        self.assertIn("specialty_food", names)
         scenic_area = next(group for group in groups if group.name == "scenic_area")
         self.assertEqual(scenic_area.keywords, "风景区")
         park = next(group for group in groups if group.name == "park")
         self.assertGreaterEqual(park.max_keep, 12)
+
+    def test_type_rules_map_theme_park_and_stadium(self) -> None:
+        mapped_park = map_amap_poi(name="北京环球度假区", typecode="080501", type_name="体育休闲服务;休闲场所;游乐场", city="北京")
+        self.assertIsNotNone(mapped_park)
+        self.assertEqual(mapped_park.place_type, "attraction")
+
+        mapped_stadium = map_amap_poi(name="国家体育场", typecode="080101", type_name="体育休闲服务;运动场馆;综合体育馆", city="北京")
+        self.assertIsNotNone(mapped_stadium)
+        self.assertEqual(mapped_stadium.place_type, "photo_spot")
+
+        mapped_market = map_amap_poi(name="潘家园旧货市场", typecode="060702", type_name="购物服务;综合市场;旧货市场", city="北京")
+        self.assertIsNotNone(mapped_market)
+        self.assertEqual(mapped_market.place_type, "market")
+
