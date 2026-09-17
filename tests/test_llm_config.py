@@ -1,5 +1,4 @@
 import os
-import pytest
 from src.config import Settings
 from src.agents.llm import resolve_role_config
 

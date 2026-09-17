@@ -454,7 +454,7 @@ VALID_ROLES = frozenset({
 })
 
 # Keyed by (provider, base_url, api_key, verify_ssl) so relay profiles stay isolated.
-_clients: dict[tuple[str, str, str, bool], AsyncOpenAI] = {}
+_clients: dict[tuple[str, str, str, bool, str | None], AsyncOpenAI] = {}
 _role_semaphores: dict[tuple[str, int], asyncio.Semaphore] = {}
 _relay_endpoint_cooldowns: dict[tuple[str, str], float] = {}
 _relay_endpoint_rotation: dict[str, int] = {}
@@ -1140,12 +1140,14 @@ def _get_client(
     resolved_base_url = base_url or custom_base_url or _PROVIDER_BASE_URLS.get(provider, "")
     if not resolved_base_url:
         raise ValueError(f"No base URL configured for provider {provider!r}")
-    key = (provider, resolved_base_url, api_key, verify_ssl)
+    proxy = s.llm_proxy.strip() or None
+    key = (provider, resolved_base_url, api_key, verify_ssl, proxy)
     if key not in _clients:
+        http_client = httpx.AsyncClient(verify=verify_ssl, proxy=proxy)
         _clients[key] = AsyncOpenAI(
             api_key=api_key,
             base_url=resolved_base_url,
-            http_client=httpx.AsyncClient(verify=verify_ssl),
+            http_client=http_client,
         )
     return _clients[key]
 
@@ -1473,7 +1475,8 @@ async def _relay_post_json(
     retry_statuses = {429, 500, 502, 503, 504}
     attempts = len(retry_delays) + 1
     last_exc: Exception | None = None
-    async with httpx.AsyncClient(verify=get_settings().llm_verify_ssl) as client:
+    llm_proxy = get_settings().llm_proxy.strip() or None
+    async with httpx.AsyncClient(verify=get_settings().llm_verify_ssl, proxy=llm_proxy) as client:
         for attempt in range(attempts):
             try:
                 response = await client.post(
@@ -1552,11 +1555,15 @@ async def _call_speculative_ds_json(
         async with _speculative_ds_bulkhead(
             int(settings.trip_worker_concurrency)
         ):
-            async with httpx.AsyncClient(
-                verify=settings.llm_verify_ssl,
-                timeout=None,
-                transport=transport,
-            ) as client:
+            client_kwargs: dict[str, Any] = {
+                "verify": settings.llm_verify_ssl,
+                "timeout": None,
+            }
+            if transport is not None:
+                client_kwargs["transport"] = transport
+            elif settings.llm_proxy.strip():
+                client_kwargs["proxy"] = settings.llm_proxy.strip()
+            async with httpx.AsyncClient(**client_kwargs) as client:
                 response = await client.post(
                     _join_endpoint(base_url, "/chat/completions"),
                     headers=headers,
@@ -1892,11 +1899,15 @@ class _WriterRelaySSEStream(AsyncIterator[WriterStreamEvent]):
             json_mode=json_mode,
         )
         self._wire_api = config.wire_api
-        self._client = httpx.AsyncClient(
-            verify=get_settings().llm_verify_ssl,
-            timeout=None,
-            transport=transport,
-        )
+        client_kwargs: dict[str, Any] = {
+            "verify": get_settings().llm_verify_ssl,
+            "timeout": None,
+        }
+        if transport is not None:
+            client_kwargs["transport"] = transport
+        elif get_settings().llm_proxy.strip():
+            client_kwargs["proxy"] = get_settings().llm_proxy.strip()
+        self._client = httpx.AsyncClient(**client_kwargs)
         self._request = self._client.build_request(
             "POST",
             url,

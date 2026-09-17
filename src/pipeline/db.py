@@ -1,6 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.config import get_settings
+from src.pipeline.db_proxy import check_and_install_db_proxy
 
 _engine = None
 _session_factory = None
@@ -9,6 +10,7 @@ _session_factory = None
 def get_engine():
     global _engine
     if _engine is None:
+        check_and_install_db_proxy()
         _engine = create_async_engine(
             get_settings().database_url,
             echo=False,

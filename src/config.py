@@ -12,6 +12,8 @@ _MAX_LLM_RECOVERY_PROBE_TIMEOUT_SECONDS = 45.0
 class Settings(BaseSettings):
     app_version: str = "0.9.9.10"
     database_url: str = "postgresql+asyncpg://user:pass@localhost:5432/yuntu_travel"
+    database_proxy: str = ""
+    llm_proxy: str = ""
     gemini_api_key: str = ""
     gemini_base_url: str = ""
     deepseek_api_key: str = ""

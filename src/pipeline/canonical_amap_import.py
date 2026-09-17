@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -34,7 +35,7 @@ from src.pipeline.poi_resolve import (
 
 logger = logging.getLogger(__name__)
 
-WRITE_BATCH_SIZE = 8
+WRITE_BATCH_SIZE = 50
 WRITE_MAX_RETRIES = 5
 
 
@@ -162,6 +163,11 @@ def prepare_hits(
         place = item[3]
         if len(prepared) >= group.max_keep:
             break
+        name = place.canonical_name
+        if "-" in name or "—" in name:
+            prefix = re.split(r"[-—]", name)[0].strip()
+            if prefix in seen_names:
+                continue
         seen_ids.add(place.poi_id)
         seen_names.add(place.canonical_name)
         prepared.append(place)
@@ -171,7 +177,7 @@ def prepare_hits(
 
 def is_disconnect_error(exc: BaseException) -> bool:
     """True when the Postgres socket died mid-statement (common on Windows/Docker)."""
-    if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, OSError)):
+    if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, OSError, TimeoutError, asyncio.TimeoutError)):
         winerr = getattr(exc, "winerror", None)
         if winerr in {121, 1236, 10054, 10053, 10060}:
             return True
@@ -185,10 +191,16 @@ def is_disconnect_error(exc: BaseException) -> bool:
         "connectiondoesnotexisterror",
         "winerror 121",
         "winerror 1236",
+        "winerror 64",
+        "winerror 10053",
+        "winerror 10054",
         "信号灯超时",
+        "网络名不再可用",
         "server closed the connection",
         "the connection is closed",
         "cannot use a connection that is closed",
+        "timeout",
+        "timed out",
     )
     if any(token in text for token in tokens):
         return True
@@ -242,7 +254,7 @@ async def persist_prepared_places(
                 index,
                 len(prepared),
             )
-        except (DBAPIError, OSError) as exc:
+        except (DBAPIError, OSError, TimeoutError, asyncio.TimeoutError) as exc:
             if not is_disconnect_error(exc) or retries >= WRITE_MAX_RETRIES:
                 raise
             retries += 1
@@ -475,6 +487,7 @@ async def import_city(
     seen_names: set[str] = set()
     prepared: list[PreparedPlace] = []
 
+    logger.info("[1/2] 正在从高德分页检索并打分 POI（城市=%s，共 %s 个分类搜索组）...", city, len(groups))
     for group in groups:
         hits = await search_group_pages(
             client,
@@ -509,6 +522,7 @@ async def import_city(
     if config.dry_run:
         return stats
 
+    logger.info("[2/2] 检索完成（共筛选出 %s 个优质地点），正在批量写入数据库（批次大小=%s）...", len(prepared), WRITE_BATCH_SIZE)
     await persist_prepared_places(city, prepared, stats)
 
     city_row = await get_or_create_city(city)

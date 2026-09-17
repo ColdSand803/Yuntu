@@ -232,6 +232,10 @@ GEMINI_API_KEY=your_gemini_api_key
 # 地理与路线服务 (高德 Web 服务 Key)
 AMAP_API_KEY=your_amap_api_key
 AMAP_ROUTE_ENABLED=true
+
+# 网络代理 (可选，用于受限网络环境，支持 http:// 或 socks5://)
+# DATABASE_PROXY=http://127.0.0.1:7890
+# LLM_PROXY=http://127.0.0.1:7890
 ```
 
 ---

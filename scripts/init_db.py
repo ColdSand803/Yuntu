@@ -18,6 +18,8 @@ SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
 
 async def main() -> None:
     settings = get_settings()
+    from src.pipeline.db_proxy import check_and_install_db_proxy
+    check_and_install_db_proxy()
     engine = create_async_engine(settings.database_url, echo=False)
 
     schema_file = SQL_DIR / "schema.sql"

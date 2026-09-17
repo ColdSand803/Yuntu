@@ -17,19 +17,25 @@ DEFAULT_VISIT_MINUTES = {
     "business_area": 60,
 }
 
-MAJOR_NAME_MARKERS = ("景区", "风景区", "古镇", "老街", "世界遗产", "国家公园", "度假区", "度假村", "艺术区")
+MAJOR_NAME_MARKERS = ("景区", "风景区", "古镇", "老街", "世界遗产", "国家公园", "度假区", "度假村", "艺术区", "植物园", "动物园", "国家", "体育场", "游泳中心", "大剧院", "乐园", "海水浴场", "沙滩", "大学")
 
 _JUNK_NAME = re.compile(
     r"(停车场|停车楼|停车位|停车点|P\d+|卫生间|公厕|厕所|出入口|售票处|检票|"
     r"闸机|充电站|加油站|收费站|公交站|地铁站|候车室|服务区|办公区|居民小区|"
-    r"物业|充电桩|肯德基|麦当劳|汉堡王|华莱士|德克士|必胜客|KFC|McDonald)"
+    r"物业|充电桩|肯德基|麦当劳|汉堡王|华莱士|德克士|必胜客|KFC|McDonald|不对外开放|不开放|内部开放|暂未开放|筹建|暂停营业|培训|驾校|考研|补习|专修|进修)"
 )
 _GATE_NAME = re.compile(r"(东门|西门|南门|北门|正门|后门|侧门|入口|出口)$")
+_CAMPUS_SUB_SPOT = re.compile(r"(学院|系|教研室|行政楼|办公楼|处|部|分部|分院|研究院|后勤|招生|就业|校医院|宿舍|食堂|实验楼|教学楼|综合楼)$")
 
 # Longest prefix first. Unlisted prefixes are rejected.
 _TYPE_RULES: tuple[tuple[str, str, int], ...] = (
     ("080501", "attraction", 96),
+    ("080400", "attraction", 88),
+    ("080603", "attraction", 88),
+    ("080602", "attraction", 88),
     ("080101", "photo_spot", 88),
+    ("080109", "attraction", 90),
+    ("141201", "attraction", 85),
     ("060702", "market", 75),
     ("060700", "market", 72),
     ("110201", "attraction", 100),
@@ -44,8 +50,8 @@ _TYPE_RULES: tuple[tuple[str, str, int], ...] = (
     ("110204", "museum", 82),
     ("110106", "park", 85),
     ("110101", "park", 82),
-    ("110102", "park", 80),
-    ("110103", "park", 80),
+    ("110102", "park", 90),
+    ("110103", "park", 90),
     ("110104", "attraction", 75),
     ("110105", "photo_spot", 70),
     ("110100", "park", 75),
@@ -122,6 +128,8 @@ def is_junk_name(name: str, city: str | None = None) -> bool:
     if _JUNK_NAME.search(compact):
         return True
     if _GATE_NAME.search(compact) and len(compact) <= 8:
+        return True
+    if _CAMPUS_SUB_SPOT.search(compact) and ("大学" in compact or "学院" in compact) and len(compact) > 4:
         return True
     return False
 

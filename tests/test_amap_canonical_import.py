@@ -78,11 +78,67 @@ class TypeMapTests(unittest.TestCase):
             )
         )
 
+    def test_beach_and_university_support(self) -> None:
+        p_beach = map_amap_poi(
+            name="青岛第一海水浴场",
+            typecode="080109",
+            type_name="体育休闲服务;运动场馆;海滨浴场",
+            rating=4.8,
+            city="青岛",
+        )
+        self.assertIsNotNone(p_beach)
+        assert p_beach is not None
+        self.assertEqual(p_beach.place_type, "attraction")
+        self.assertGreaterEqual(p_beach.base_priority, 98)
+
+        p_univ = map_amap_poi(
+            name="武汉大学",
+            typecode="141201",
+            type_name="科教文化服务;学校;高等院校",
+            rating=4.9,
+            city="武汉",
+        )
+        self.assertIsNotNone(p_univ)
+        assert p_univ is not None
+        self.assertEqual(p_univ.place_type, "attraction")
+        self.assertGreaterEqual(p_univ.base_priority, 95)
+
+        # Campus sub-department buildings should be rejected
+        self.assertTrue(is_junk_name("武汉大学艺术学院", city="武汉"))
+        self.assertTrue(is_junk_name("清华大学第1教学楼", city="北京"))
+        self.assertTrue(is_junk_name("新东方考研培训学校", city="北京"))
+
+    def test_botanical_garden_and_zoo_priority(self) -> None:
+        mapped_bot = map_amap_poi(
+            name="国家植物园",
+            typecode="110103",
+            type_name="风景名胜;公园广场;植物园",
+            rating=4.8,
+            city="北京",
+        )
+        self.assertIsNotNone(mapped_bot)
+        assert mapped_bot is not None
+        self.assertEqual(mapped_bot.place_type, "park")
+        self.assertGreaterEqual(mapped_bot.base_priority, 98)
+
+        mapped_zoo = map_amap_poi(
+            name="北京动物园",
+            typecode="110102",
+            type_name="风景名胜;公园广场;动物园",
+            rating=4.7,
+            city="北京",
+        )
+        self.assertIsNotNone(mapped_zoo)
+        assert mapped_zoo is not None
+        self.assertEqual(mapped_zoo.place_type, "park")
+        self.assertGreaterEqual(mapped_zoo.base_priority, 98)
+
     def test_junk_names(self) -> None:
         self.assertTrue(is_junk_name("宽窄巷子停车场", city="成都"))
         self.assertTrue(is_junk_name("南门", city="成都"))
         self.assertTrue(is_junk_name("成都", city="成都"))
         self.assertTrue(is_junk_name("肯德基(春熙路店)", city="成都"))
+        self.assertTrue(is_junk_name("药用植物园(不对外开放)", city="北京"))
         self.assertFalse(is_junk_name("宽窄巷子", city="成都"))
 
     def test_force_accommodation_area(self) -> None:
@@ -253,7 +309,7 @@ class SearchGroupTests(unittest.TestCase):
         self.assertIn("landmarks_resort", names)
         self.assertIn("specialty_food", names)
         scenic_area = next(group for group in groups if group.name == "scenic_area")
-        self.assertEqual(scenic_area.keywords, "风景区")
+        self.assertIn("风景区", scenic_area.keywords)
         park = next(group for group in groups if group.name == "park")
         self.assertGreaterEqual(park.max_keep, 12)
 
