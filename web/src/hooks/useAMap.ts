@@ -16,6 +16,11 @@ export function useAMap({ containerId, zoom = 12, center }: UseAMapOptions) {
   useEffect(() => {
     let destroyed = false;
 
+    const security = import.meta.env.VITE_AMAP_SECURITY;
+    if (security) {
+      (window as any)._AMapSecurityConfig = { securityJsCode: security };
+    }
+
     AMapLoader.load({
       key: import.meta.env.VITE_AMAP_KEY || "",
       version: "2.0",
